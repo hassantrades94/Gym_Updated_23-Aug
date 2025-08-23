@@ -1748,7 +1748,7 @@ export default function GymOwnerDashboard() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black pb-20 text-white">
       <header className="fixed top-0 left-0 right-0 z-50 bg-[#da1c24] border-b border-red-800">
-        <div className="max-w-4xl mx-auto px-4 py-3">
+        <div className="max-w-md mx-auto px-4 py-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center">
@@ -1772,7 +1772,7 @@ export default function GymOwnerDashboard() {
       </header>
 
       <main className="px-4 py-6 pt-20">
-        <div className="max-w-4xl mx-auto">
+        <div className="max-w-md mx-auto">
           {isLoadingSubscription ? (
             <div className="flex items-center justify-center p-8">
               <Loader2 className="h-8 w-8 animate-spin" />
@@ -1783,8 +1783,8 @@ export default function GymOwnerDashboard() {
           {/* Welcome Section */}
           <div className="text-center">
             <h1 className="text-3xl font-bold text-transparent bg-gradient-to-r from-white via-red-200 to-white bg-clip-text mb-2">
-              {gymData.gymName} Dashboard
-            </h1>
+                    {gymData.gymName}
+                  </h1>
             <p className="text-gray-300 text-lg">Welcome back, {gymData.ownerName}!</p>
             <div className="flex items-center justify-center gap-4 mt-4">
               <Badge
