@@ -53,6 +53,7 @@ export default function MemberDashboard() {
     nextPayment: string
     gymName: string
     gymCode: string
+    gymId: string | null
     coinValue: number
     referralCode: string
     height: number
@@ -65,15 +66,16 @@ export default function MemberDashboard() {
     coins: 0,
     streak: 0,
     monthlyVisits: 0,
-    membershipPlan: "Standard",
-    nextPayment: "2024-01-15",
+    membershipPlan: "",
+    nextPayment: "",
     gymName: "",
     gymCode: "",
-    coinValue: 4.0,
+    gymId: null,
+    coinValue: 0,
     referralCode: "",
     height: 0,
     weight: 0,
-    profilePicture: null as string | null,
+    profilePicture: null,
   })
   const [isLoading, setIsLoading] = useState(true)
 
@@ -265,6 +267,7 @@ export default function MemberDashboard() {
           nextPayment: membershipData?.expiry_date || "",
           gymName: membershipData?.gyms?.gym_name || "",
           gymCode: membershipData?.gyms?.gym_code || "",
+          gymId: membershipData?.gym_id ?? null,
           coinValue: membershipData?.gyms?.coin_value ?? 4.0,
           referralCode: user.phone_number || "",
           height: user.height || 0,
@@ -391,14 +394,62 @@ export default function MemberDashboard() {
 
   const handleCheckIn = async () => {
     setIsCheckingIn(true)
-
-    setTimeout(() => {
+  
+    try {
+      const userData = localStorage.getItem("flexio_user")
+      if (!userData) throw new Error("User not authenticated")
+      
+      const user = JSON.parse(userData)
+      const now = new Date().toISOString()
+      
+      // Insert check-in record
+      const { error: checkInError } = await supabase
+        .from("check_ins")
+        .insert({
+          user_id: user.id,
+          gym_id: memberData.gymId,
+          check_in_time: now,
+          location_latitude: location?.lat,
+          location_longitude: location?.lng,
+          distance_from_gym: distanceFromGym,
+        })
+      
+      if (checkInError) throw checkInError
+      
+      // Award coins
+      const { error: coinError } = await supabase
+        .from("coin_transactions")
+        .insert({
+          user_id: user.id,
+          gym_id: memberData.gymId,
+          transaction_type: "earned",
+          amount: 100,
+          description: "Daily check-in reward",
+        })
+      
+      if (coinError) throw coinError
+      
+      // Update member data
+      setMemberData((prev) => ({
+        ...prev,
+        coins: prev.coins + 100,
+        monthlyVisits: prev.monthlyVisits + 1,
+      }))
+      
       toast({
         title: "Check-in successful! 🎉",
         description: "You earned 100 coins for today's workout!",
       })
+    } catch (error) {
+      console.error("Check-in error:", error)
+      toast({
+        title: "Check-in failed",
+        description: "Please try again later.",
+        variant: "destructive",
+      })
+    } finally {
       setIsCheckingIn(false)
-    }, 1500)
+    }
   }
 
   const handleManualCheckIn = async () => {

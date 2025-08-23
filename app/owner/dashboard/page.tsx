@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -46,6 +47,7 @@ import {
 import { useToast } from "@/hooks/use-toast"
 import { supabase } from "@/lib/supabase"
 import { getCurrentUser } from "@/lib/auth"
+import { SubscriptionService, SubscriptionData } from "@/lib/subscription-service"
 
 type GymPlan = {
   id: string
@@ -58,6 +60,7 @@ type GymPlan = {
 
 export default function GymOwnerDashboard() {
   const { toast } = useToast()
+  const router = useRouter()
   const [searchTerm, setSearchTerm] = useState("")
 
   useEffect(() => {
@@ -70,7 +73,7 @@ export default function GymOwnerDashboard() {
           variant: "destructive",
         })
         setTimeout(() => {
-          window.location.href = "/auth/signin"
+          router.push("/auth/signin")
         }, 2000)
         return
       }
@@ -84,14 +87,14 @@ export default function GymOwnerDashboard() {
           variant: "destructive",
         })
         setTimeout(() => {
-          window.location.href = role === "member" ? "/member/dashboard" : "/auth/signin"
+          router.push(role === "member" ? "/member/dashboard" : "/auth/signin")
         }, 2000)
         return
       }
     }
 
     checkUserRole()
-  }, [toast])
+  }, [toast, router])
 
   const [selectedFilter, setSelectedFilter] = useState("all")
   const [isEditingCoinValue, setIsEditingCoinValue] = useState(false)
@@ -127,6 +130,42 @@ export default function GymOwnerDashboard() {
 
   const [walletModalOpen, setWalletModalOpen] = useState(false)
   const [rechargeAmount, setRechargeAmount] = useState("")
+  const [subscriptionData, setSubscriptionData] = useState<SubscriptionData | null>(null)
+  const [isLoadingSubscription, setIsLoadingSubscription] = useState(false)
+
+  type NotificationSettings = {
+    paymentReminders: boolean
+    birthdayNotifications: boolean
+  }
+
+  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>({
+    paymentReminders: true,
+    birthdayNotifications: true,
+  })
+
+  const toggleNotificationSetting = async (setting: 'paymentReminders' | 'birthdayNotifications') => {
+    const newValue = !notificationSettings[setting]
+
+    try {
+      // Update in database if you have a settings table
+      // For now, just update local state
+      setNotificationSettings((prev) => ({
+        ...prev,
+        [setting]: newValue,
+      }))
+
+      toast({
+        title: "Settings Updated",
+        description: `${setting === 'paymentReminders' ? 'Payment reminders' : 'Birthday notifications'} ${newValue ? 'enabled' : 'disabled'}`,
+      })
+    } catch (error: any) {
+      toast({
+        title: "Failed to update settings",
+        description: error.message || "Please try again",
+        variant: "destructive",
+      })
+    }
+  }
 
   // Additional state for live data
   const [revenueData, setRevenueData] = useState<{ month: string; revenue: number; members: number }[]>([])
@@ -162,46 +201,24 @@ export default function GymOwnerDashboard() {
     monthlyRevenue: 0,
     revenueGrowth: 0,
     pendingPayments: 0,
-    coinValue: 4.0,
-    location: { lat: 40.7128, lng: -74.006 },
+    coinValue: 0,
+    location: null,
     ownerName: "",
     gymName: "",
     gymCode: "",
     newMembersThisMonth: 0,
     walletBalance: 0,
     freeMembersUsed: 0,
-    totalFreeMembers: 5,
-    subscriptionStatus: "active",
+    totalFreeMembers: 5, // Fixed to 5 as per business logic
+    paidMembers: 0,
+    hiddenMembers: 0, // Add this field
+    requiredAmount: 0, // Add this field
+    subscriptionStatus: "",
     nextBillingDate: "",
-    monthlyChargePerMember: 15,
+    monthlyChargePerMember: 0,
   })
 
-  const [gymPlans, setGymPlans] = useState<GymPlan[]>([
-    {
-      id: "1",
-      name: "Basic",
-      price: 2400, // INR
-      duration: "monthly",
-      features: ["Equipment access", "Locker room", "Basic support"],
-      active: true,
-    },
-    {
-      id: "2",
-      name: "Standard",
-      price: 4000, // INR
-      duration: "monthly",
-      features: ["Everything in Basic", "Group classes", "Nutrition tracking", "Priority support"],
-      active: true,
-    },
-    {
-      id: "3",
-      name: "Premium",
-      price: 7200, // INR
-      duration: "monthly",
-      features: ["Everything in Standard", "Personal training", "Advanced analytics", "24/7 access"],
-      active: true,
-    },
-  ])
+  const [gymPlans, setGymPlans] = useState<GymPlan[]>([])
 
   const [newPlan, setNewPlan] = useState({
     name: "",
@@ -216,6 +233,100 @@ export default function GymOwnerDashboard() {
     plan: "",
   })
 
+  // Load subscription data
+  const loadSubscriptionData = async () => {
+    if (!gymId) return
+    
+    setIsLoadingSubscription(true)
+    try {
+      const subData = await SubscriptionService.calculateSubscriptionData(gymId)
+      setSubscriptionData(subData)
+      
+      // Update gymData with subscription info - sync with live data
+      setGymData(prev => ({
+        ...prev,
+        walletBalance: subData.walletBalance,
+        nextBillingDate: subData.nextBillingDate,
+        totalMembers: subData.totalMembers,
+        freeMembersUsed: subData.freeMembers, // Sync with live data
+        totalFreeMembers: 5, // Always 5 as per business logic
+        paidMembers: subData.paidMembers,
+        hiddenMembers: subData.hiddenMembers, // Add hidden members count
+        requiredAmount: subData.requiredAmount // Add required amount for hidden members
+      }))
+    } catch (error) {
+      console.error('Error loading subscription data:', error)
+    } finally {
+      setIsLoadingSubscription(false)
+    }
+  }
+
+  // Load visible members based on subscription rules
+  const loadVisibleMembers = async () => {
+    if (!gymId) return
+    
+    try {
+      const visibleMembers = await SubscriptionService.getVisibleMembers(gymId)
+      
+      // Get user IDs for additional data
+      const userIds = visibleMembers.map((m: any) => m.user_id)
+      
+      // Aggregate coin balances per user
+      let coinMap: Record<string, number> = {}
+      if (userIds.length > 0) {
+        const { data: coinTx } = await supabase
+          .from("coin_transactions")
+          .select("user_id, amount, transaction_type")
+          .in("user_id", userIds)
+          .eq("gym_id", gymId)
+        for (const tx of coinTx || []) {
+          const delta = tx.transaction_type === "spent" ? -Number(tx.amount) : Number(tx.amount)
+          coinMap[tx.user_id] = (coinMap[tx.user_id] || 0) + delta
+        }
+      }
+
+      // Last visit per user
+      let lastVisitMap: Record<string, string> = {}
+      if (userIds.length > 0) {
+        const { data: visits } = await supabase
+          .from("check_ins")
+          .select("user_id, check_in_time")
+          .in("user_id", userIds)
+          .eq("gym_id", gymId)
+          .order("check_in_time", { ascending: false })
+        for (const v of visits || []) {
+          if (!lastVisitMap[v.user_id]) lastVisitMap[v.user_id] = v.check_in_time
+        }
+      }
+
+      setMembers(
+        visibleMembers.map((m: any) => ({
+          id: m.user_id,
+          membershipId: m.id,
+          name: m.users?.full_name || "",
+          email: "",
+          phone: m.users?.phone_number || "",
+          plan: m.gym_plans?.plan_name || "",
+          status: m.is_active ? "active" : "expired",
+          lastVisit: lastVisitMap[m.user_id] || "",
+          joinDate: m.start_date,
+          planEndDate: m.expiry_date,
+          paymentStatus: m.payment_status === "paid" ? "paid" : m.payment_status || "",
+          totalVisits: 0,
+          weeklyVisits: 0,
+          currentStreak: 0,
+          totalCoins: coinMap[m.user_id] || 0,
+          avatar: "",
+          profilePicture: m.users?.profile_picture_url || null,
+          isFree: m.isFree,
+          memberType: m.memberType
+        }))
+      )
+    } catch (error) {
+      console.error('Error loading visible members:', error)
+    }
+  }
+
   // Load live data from Supabase
   useEffect(() => {
     const user = getCurrentUser()
@@ -223,21 +334,48 @@ export default function GymOwnerDashboard() {
 
     const load = async () => {
       try {
-        // Fetch owner details
+        // Fetch owner details - Fixed to handle no results
         const { data: ownerData, error: ownerError } = await supabase
           .from("users")
           .select("full_name")
           .eq("id", user.id)
-          .single()
-        if (ownerError) throw ownerError
+          .maybeSingle()
+        
+        if (ownerError) {
+          console.error("Error fetching owner data:", ownerError)
+          toast({
+            title: "Error",
+            description: "Failed to load owner information",
+            variant: "destructive",
+          })
+          return
+        }
 
-        // Fetch gym owned by current user
+        // Fetch gym owned by current user - Fixed to handle no results
         const { data: gym, error: gErr } = await supabase
           .from("gyms")
           .select("id, gym_name, gym_code, coin_value, subscription_status, free_member_count")
           .eq("owner_id", user.id)
-          .single()
-        if (gErr) throw gErr
+          .maybeSingle()
+        
+        if (gErr) {
+          console.error("Error fetching gym data:", gErr)
+          toast({
+            title: "Error",
+            description: "Failed to load gym information",
+            variant: "destructive",
+          })
+          return
+        }
+
+        if (!gym) {
+          toast({
+            title: "No Gym Found",
+            description: "No gym is associated with your account. Please contact support.",
+            variant: "destructive",
+          })
+          return
+        }
 
         setGymId(gym.id)
         const coinVal = Number(gym.coin_value || 4)
@@ -252,17 +390,34 @@ export default function GymOwnerDashboard() {
           freeMembersUsed: Number(gym.free_member_count || 0),
         }))
 
-        // Wallet info
-        const { data: wallet } = await supabase
+        // Wallet info - Fixed to handle no results
+        const { data: wallet, error: walletError } = await supabase
           .from("gym_wallets")
           .select("balance_inr, last_billing_date")
           .eq("gym_id", gym.id)
-          .single()
-        if (wallet) {
+          .maybeSingle()
+        
+        if (walletError) {
+          console.error("Error fetching wallet data:", walletError)
+        } else if (wallet) {
+          // Calculate next billing date (30 days from last billing or today if no last billing)
+          const lastBilling = wallet.last_billing_date ? new Date(wallet.last_billing_date) : new Date()
+          const nextBilling = new Date(lastBilling)
+          nextBilling.setDate(nextBilling.getDate() + 30)
+          
           setGymData((prev) => ({
             ...prev,
             walletBalance: Number(wallet.balance_inr || 0),
-            nextBillingDate: wallet.last_billing_date || prev.nextBillingDate,
+            nextBillingDate: nextBilling.toISOString().split('T')[0],
+          }))
+        } else {
+          // No wallet record exists, create next billing date as 30 days from now
+          const nextBilling = new Date()
+          nextBilling.setDate(nextBilling.getDate() + 30)
+          
+          setGymData((prev) => ({
+            ...prev,
+            nextBillingDate: nextBilling.toISOString().split('T')[0],
           }))
         }
 
@@ -292,7 +447,19 @@ export default function GymOwnerDashboard() {
         const totalMembers = mems?.length || 0
         const activeMembers = (mems || []).filter((m) => m.is_active).length
         const pendingPayments = (mems || []).filter((m) => m.payment_status !== "paid").length
-        setGymData((prev) => ({ ...prev, totalMembers, activeMembers, pendingPayments }))
+        
+        // Calculate free and paid members correctly
+        const freeMembersUsed = Math.min(totalMembers, 5) // First 5 are free
+        const paidMembers = Math.max(0, totalMembers - 5) // Members beyond 5 are paid
+        
+        setGymData((prev) => ({ 
+          ...prev, 
+          totalMembers, 
+          activeMembers, 
+          pendingPayments,
+          freeMembersUsed,
+          paidMembers
+        }))
 
         // Compute revenue growth and monthly revenue
         const now = new Date()
@@ -468,35 +635,29 @@ export default function GymOwnerDashboard() {
           }
         }
 
-        setMembers(
-          (memberRows || []).map((m: any) => ({
-            id: m.user_id,
-            membershipId: m.id, // Add membershipId for updates
-            name: m.users?.full_name || "Member",
-            email: "",
-            phone: m.users?.phone_number || "",
-            plan: m.gym_plans?.plan_name || "-",
-            status: m.is_active ? "active" : "expired",
-            lastVisit: lastVisitMap[m.user_id] || "",
-            joinDate: m.start_date,
-            planEndDate: m.expiry_date,
-            paymentStatus: m.payment_status === "paid" ? "paid" : m.payment_status || "pending",
-            totalVisits: 0,
-            weeklyVisits: 0,
-            currentStreak: 0,
-            totalCoins: coinMap[m.user_id] || 0,
-            avatar: "/placeholder.svg?height=40&width=40",
-            profilePicture: m.users?.profile_picture_url || null,
-          }))
-        )
+        // Load subscription data and visible members instead of all members
+        await loadSubscriptionData()
+        await loadVisibleMembers()
       } catch (e: any) {
-        console.error(e)
-        toast({ title: "Failed to load gym data", description: e.message || "", variant: "destructive" })
+        console.error("Error loading dashboard data:", e)
+        toast({
+          title: "Error",
+          description: "Failed to load dashboard data. Please refresh the page.",
+          variant: "destructive",
+        })
       }
     }
 
     load()
-  }, [])
+  }, [toast])
+
+  // Reload subscription data when gymId changes
+  useEffect(() => {
+    if (gymId) {
+      loadSubscriptionData()
+      loadVisibleMembers()
+    }
+  }, [gymId])
 
   const getDaysUntilExpiration = (status: string, joinDate: string): number => {
     if (status !== "expiring") return 0
@@ -1351,6 +1512,102 @@ export default function GymOwnerDashboard() {
   }
 
   const handleWalletRecharge = async () => {
+    if (!rechargeAmount || Number.parseInt(rechargeAmount) < 10) {
+      toast({
+        title: "Invalid amount",
+        description: "Minimum recharge amount is ₹10",
+        variant: "destructive",
+      })
+      return
+    }
+
+    if (!gymId) {
+      toast({
+        title: "Error",
+        description: "Gym ID not found",
+        variant: "destructive",
+      })
+      return
+    }
+
+    try {
+      const response = await fetch("/api/subscription/recharge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gymId: gymId,
+          amount: Number.parseInt(rechargeAmount),
+          paymentId: `manual_recharge_${Date.now()}`, // In production, this would come from payment gateway
+        }),
+      })
+
+      const result = await response.json()
+      
+      if (result.success) {
+        toast({
+          title: "Wallet Recharged!",
+          description: result.message,
+        })
+        
+        // Reload subscription data to reflect new balance
+        await loadSubscriptionData()
+        await loadVisibleMembers()
+        
+        setWalletModalOpen(false)
+        setRechargeAmount("")
+      } else {
+        throw new Error(result.message)
+      }
+    } catch (error: any) {
+      toast({
+        title: "Recharge Failed",
+        description: error.message || "Failed to recharge wallet",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handleManualBilling = async () => {
+    if (!gymId) return
+    
+    try {
+      const response = await fetch("/api/subscription/billing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gymId: gymId,
+          action: "process_billing"
+        }),
+      })
+
+      const result = await response.json()
+      
+      if (result.success) {
+        toast({
+          title: "Billing Processed",
+          description: result.message,
+        })
+        
+        // Reload data
+        await loadSubscriptionData()
+        await loadVisibleMembers()
+      } else {
+        toast({
+          title: "Billing Failed",
+          description: result.message,
+          variant: "destructive",
+        })
+      }
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: "Failed to process billing",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handleOldWalletRecharge = async () => {
     if (!rechargeAmount || Number.parseInt(rechargeAmount) < 30) return
 
     try {
@@ -1433,6 +1690,61 @@ export default function GymOwnerDashboard() {
     }
   }
 
+  const processMonthlyBilling = async () => {
+    if (!gymId) return
+    
+    try {
+      const paidMembers = Math.max(0, gymData.totalMembers - 5)
+      const billingAmount = paidMembers * 10
+      
+      if (billingAmount > 0 && gymData.walletBalance >= billingAmount) {
+        // Deduct from wallet
+        const { error: walletError } = await supabase
+          .from("gym_wallets")
+          .update({ 
+            balance_inr: gymData.walletBalance - billingAmount,
+            last_billing_date: new Date().toISOString().split("T")[0]
+          })
+          .eq("gym_id", gymId)
+        
+        if (walletError) throw walletError
+        
+        // Record transaction
+        const { error: transactionError } = await supabase
+          .from("wallet_transactions")
+          .insert({
+            gym_id: gymId,
+            transaction_type: "monthly_billing",
+            amount_inr: billingAmount,
+            description: `Monthly billing for ${paidMembers} paid members`
+          })
+        
+        if (transactionError) throw transactionError
+        
+        toast({
+          title: "Billing Processed",
+          description: `₹${billingAmount} deducted for ${paidMembers} paid members`,
+        })
+        
+        // Refresh data
+        window.location.reload()
+      } else if (billingAmount > gymData.walletBalance) {
+        toast({
+          title: "Insufficient Balance",
+          description: "Please recharge your wallet to continue service",
+          variant: "destructive"
+        })
+      }
+    } catch (error) {
+      console.error("Billing error:", error)
+      toast({
+        title: "Billing Failed",
+        description: "Failed to process monthly billing",
+        variant: "destructive"
+      })
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black pb-20 text-white">
       <header className="fixed top-0 left-0 right-0 z-50 bg-[#da1c24] border-b border-red-800">
@@ -1460,7 +1772,14 @@ export default function GymOwnerDashboard() {
       </header>
 
       <main className="px-4 py-6 pt-20">
-        <div className="max-w-4xl mx-auto space-y-6">
+        <div className="max-w-4xl mx-auto">
+          {isLoadingSubscription ? (
+            <div className="flex items-center justify-center p-8">
+              <Loader2 className="h-8 w-8 animate-spin" />
+            </div>
+          ) : (
+            gymData.gymName && (
+              <div className="space-y-6">
           {/* Welcome Section */}
           <div className="text-center">
             <h1 className="text-3xl font-bold text-transparent bg-gradient-to-r from-white via-red-200 to-white bg-clip-text mb-2">
@@ -1610,7 +1929,12 @@ export default function GymOwnerDashboard() {
                     <div className="p-3 bg-gray-700/30 rounded-lg">
                       <p className="text-xs text-gray-400">Paid Members</p>
                       <p className="text-lg font-semibold text-white">
-                        {gymData.totalMembers - gymData.totalFreeMembers}
+                        {gymData.paidMembers || 0}
+                        {gymData.hiddenMembers > 0 && (
+                          <span className="text-xs text-red-400 ml-1">
+                            ({gymData.hiddenMembers} hidden)
+                          </span>
+                        )}
                       </p>
                     </div>
                   </div>
@@ -1623,19 +1947,24 @@ export default function GymOwnerDashboard() {
                         {gymData.subscriptionStatus}
                       </Badge>
                     </div>
-                    <p className="text-xs text-gray-400 mb-1">Date: {gymData.nextBillingDate}</p>
+                    <p className="text-xs text-gray-400 mb-1">
+                      Date: {gymData.nextBillingDate || 'Not set'}
+                    </p>
                     <p className="text-xs text-gray-400">
-                      Charge: ₹{gymData.monthlyChargePerMember} × {gymData.activeMembers} members = ₹
-                      {gymData.monthlyChargePerMember * gymData.activeMembers}
+                      Charge: ₹10 × {gymData.paidMembers || 0} paid members = ₹
+                      {10 * (gymData.paidMembers || 0)}
                     </p>
                   </div>
 
-                  {/* Member Addition Cost */}
-                  {gymData.freeMembersUsed >= gymData.totalFreeMembers && (
-                    <div className="p-3 bg-orange-900/20 border border-orange-700/30 rounded-lg">
-                      <p className="text-sm text-orange-300">
+                  {/* Hidden Members Warning */}
+                  {gymData.hiddenMembers > 0 && (
+                    <div className="p-3 bg-red-900/20 border border-red-700/30 rounded-lg">
+                      <p className="text-sm text-red-300">
                         <AlertCircle className="h-4 w-4 inline mr-1" />
-                        New member cost: ₹15 per member
+                        {gymData.hiddenMembers} members are hidden due to low balance. Recharge to unhide.
+                      </p>
+                      <p className="text-xs text-red-400 mt-1">
+                        Required: ₹{gymData.requiredAmount} to show all members
                       </p>
                     </div>
                   )}
@@ -2394,26 +2723,49 @@ export default function GymOwnerDashboard() {
                     <div>
                       <Label className="text-white">Coin Value (INR)</Label>
                       <div className="flex gap-2 mt-2">
-                        <Input
-                          type="number"
-                          step="0.1"
-                          value={tempCoinValue}
-                          onChange={(e) => setTempCoinValue(e.target.value)}
-                          placeholder="4.0"
-                          className="bg-gray-700 border-gray-600 text-white"
-                        />
-                        <Button
-                          onClick={() => {
-                            setCoinValue(Number.parseFloat(tempCoinValue) || 4.0)
-                            setTempCoinValue("")
-                            toast({ title: "Updated!", description: "Coin value has been updated." })
-                          }}
-                          className="bg-transparent border border-white text-white hover:bg-white hover:text-gray-900"
-                        >
-                          Update
-                        </Button>
+                        {isEditingCoinValue ? (
+                          <>
+                            <Input
+                              type="number"
+                              step="0.1"
+                              value={tempCoinValue}
+                              onChange={(e) => setTempCoinValue(e.target.value)}
+                              placeholder="4.0"
+                              className="bg-gray-700 border-gray-600 text-white"
+                            />
+                            <Button
+                              onClick={saveCoinValue}
+                              className="bg-green-600 hover:bg-green-700 text-white"
+                            >
+                              Save
+                            </Button>
+                            <Button
+                              onClick={cancelCoinValueEdit}
+                              variant="outline"
+                              className="border-gray-600 text-white hover:bg-gray-700 bg-transparent"
+                            >
+                              Cancel
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <Input
+                              type="number"
+                              step="0.1"
+                              value={gymData.coinValue.toString()}
+                              readOnly
+                              className="bg-gray-700 border-gray-600 text-white"
+                            />
+                            <Button
+                              onClick={handleCoinValueEdit}
+                              className="bg-transparent border border-white text-white hover:bg-white hover:text-gray-900"
+                            >
+                              Edit
+                            </Button>
+                          </>
+                        )}
                       </div>
-                      <p className="text-gray-400 text-sm mt-1">Current: 1 coin = ₹{coinValue.toFixed(2)}</p>
+                      <p className="text-gray-400 text-sm mt-1">Current: 1 coin = ₹{gymData.coinValue.toFixed(2)}</p>
                     </div>
                   </CardContent>
                 </Card>
@@ -2425,16 +2777,30 @@ export default function GymOwnerDashboard() {
                   <CardContent className="space-y-4">
                     <div>
                       <Label className="text-white">Current Location</Label>
-                      <p className="text-gray-300">Mumbai, Maharashtra, India</p>
+                      {gymData.location ? (
+                        <p className="text-gray-300">
+                          Lat: {gymData.location.lat.toFixed(6)}, Lng: {gymData.location.lng.toFixed(6)}
+                        </p>
+                      ) : (
+                        <p className="text-gray-300">Location not set</p>
+                      )}
                     </div>
                     <Button
-                      onClick={() => {
-                        toast({ title: "Location Updated!", description: "Gym location has been updated." })
-                      }}
+                      onClick={updateGymLocation}
+                      disabled={isGettingLocation}
                       className="bg-transparent border border-white text-white hover:bg-white hover:text-gray-900"
                     >
-                      <MapPin className="h-4 w-4 mr-2" />
-                      Update Location
+                      {isGettingLocation ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Getting Location...
+                        </>
+                      ) : (
+                        <>
+                          <MapPin className="h-4 w-4 mr-2" />
+                          Update Location
+                        </>
+                      )}
                     </Button>
                   </CardContent>
                 </Card>
@@ -2449,8 +2815,16 @@ export default function GymOwnerDashboard() {
                         <p className="text-white">Payment Reminders</p>
                         <p className="text-gray-300 text-sm">Send automatic payment reminders to members</p>
                       </div>
-                      <Button variant="outline" className="border-gray-600 text-white hover:bg-gray-700 bg-transparent">
-                        Enabled
+                      <Button
+                        onClick={() => toggleNotificationSetting('paymentReminders')}
+                        variant="outline"
+                        className={`border-gray-600 hover:bg-gray-700 bg-transparent ${
+                          notificationSettings.paymentReminders
+                            ? 'text-green-400 border-green-400'
+                            : 'text-gray-400 border-gray-600'
+                        }`}
+                      >
+                        {notificationSettings.paymentReminders ? 'Enabled' : 'Disabled'}
                       </Button>
                     </div>
                     <div className="flex items-center justify-between">
@@ -2458,8 +2832,16 @@ export default function GymOwnerDashboard() {
                         <p className="text-white">Birthday Notifications</p>
                         <p className="text-gray-300 text-sm">Get notified about member birthdays</p>
                       </div>
-                      <Button variant="outline" className="border-gray-600 text-white hover:bg-gray-700 bg-transparent">
-                        Enabled
+                      <Button
+                        onClick={() => toggleNotificationSetting('birthdayNotifications')}
+                        variant="outline"
+                        className={`border-gray-600 hover:bg-gray-700 bg-transparent ${
+                          notificationSettings.birthdayNotifications
+                            ? 'text-green-400 border-green-400'
+                            : 'text-gray-400 border-gray-600'
+                        }`}
+                      >
+                        {notificationSettings.birthdayNotifications ? 'Enabled' : 'Disabled'}
                       </Button>
                     </div>
                   </CardContent>
@@ -2467,7 +2849,10 @@ export default function GymOwnerDashboard() {
               </div>
             </TabsContent>
           </Tabs>
-        </div>
+                </div>
+              )
+            )}
+          </div>
       </main>
 
       <Dialog open={walletModalOpen} onOpenChange={setWalletModalOpen}>

@@ -114,19 +114,18 @@ export default function MemberProfile() {
         const plansRelation = membership?.gym_plans as any
         const planObj = Array.isArray(plansRelation) ? plansRelation[0] : plansRelation
 
-        setProfileData((prev) => ({
-          ...prev,
+        setProfileData({
           name: userRow?.full_name || "",
           phone: userRow?.phone_number || "",
           dateOfBirth: userRow?.date_of_birth || "",
           gender: userRow?.gender || "",
-          height: Number(userRow?.height ?? 0),
-          weight: Number(userRow?.weight ?? 0),
+          height: userRow?.height || 0,
+          weight: userRow?.weight || 0,
           gymName: gymObj?.gym_name || "",
           gymCode: gymObj?.gym_code || "",
           membershipPlan: planObj?.plan_name || "",
           profilePicture: userRow?.profile_picture_url || null,
-        }))
+        })
       } catch (e: any) {
         console.error(e)
         toast({

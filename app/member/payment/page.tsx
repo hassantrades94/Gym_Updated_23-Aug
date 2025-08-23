@@ -448,7 +448,7 @@ export default function PaymentPage() {
             <CardContent>
               <div className="flex items-center justify-between mb-4">
                 <div>
-                  <p className="text-2xl font-bold text-white capitalize">{currentPlan || ""}</p>
+                  <p className="text-2xl font-bold text-white capitalize">{currentPlan}</p>
                   <p className="text-sm text-gray-400 py-[9px]">
                     Next payment: {nextPayment ? new Date(nextPayment).toLocaleDateString() : "-"}
                   </p>

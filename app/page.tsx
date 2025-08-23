@@ -49,6 +49,16 @@ export default function HomePage() {
               Transform your fitness journey with AI-powered nutrition analysis, smart rewards, and seamless gym
               management.
             </p>
+            
+            {/* Register Your Gym Button - Fixed width to match other blocks */}
+            <div className="mt-6">
+              <Link href="/auth/signup?type=owner" className="block">
+                <Button className="w-full bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white py-5 text-xl font-semibold rounded-xl shadow-lg">
+                  <Dumbbell className="h-6 w-6 mr-2" />
+                  Register Your Gym
+                </Button>
+              </Link>
+            </div>
           </div>
 
           {/* Key Stats */}
@@ -154,17 +164,8 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* CTA Section */}
+          {/* CTA Section - Remove the Register Your Gym button from here */}
           <div className="space-y-6 pt-8">
-            <div className="space-y-3">
-              <Link href="/auth/signup?type=owner" className="block">
-                <Button className="w-full bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white py-4 text-lg font-semibold rounded-xl shadow-lg">
-                  <Dumbbell className="h-5 w-5 mr-2" />
-                  Register Your Gym
-                </Button>
-              </Link>
-            </div>
-
             <div className="text-center space-y-4">
               <p className="text-sm text-gray-400">
                 Already have an account?{" "}
