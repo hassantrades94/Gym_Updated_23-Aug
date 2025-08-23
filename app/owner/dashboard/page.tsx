@@ -43,6 +43,9 @@ import {
   Coins,
   Wallet,
   Loader2,
+  Trash2,
+  AlertTriangle,
+  Edit,
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { supabase } from "@/lib/supabase"
@@ -114,6 +117,16 @@ export default function GymOwnerDashboard() {
   const [coinValue, setCoinValue] = useState(4.0)
   const [gymId, setGymId] = useState<string | null>(null)
   const [isPlanSaving, setIsPlanSaving] = useState(false)
+
+  // Add new state variables for member deletion
+  const [memberDeleteConfirmOpen, setMemberDeleteConfirmOpen] = useState(false)
+  const [memberSecondConfirmOpen, setMemberSecondConfirmOpen] = useState(false)
+  const [memberToDelete, setMemberToDelete] = useState<any>(null)
+  const [isDeletingMember, setIsDeletingMember] = useState(false)
+  
+  // Add new state variables for payment dialog edit functionality
+  const [isEditingPayment, setIsEditingPayment] = useState(false)
+  const [originalPlanEndDate, setOriginalPlanEndDate] = useState("")
 
   const [coinModalOpen, setCoinModalOpen] = useState(false)
   const [selectedMemberForCoins, setSelectedMemberForCoins] = useState<any>(null)
@@ -216,6 +229,7 @@ export default function GymOwnerDashboard() {
     subscriptionStatus: "",
     nextBillingDate: "",
     monthlyChargePerMember: 0,
+    todaysCheckIns: 0, // Add this new field
   })
 
   const [gymPlans, setGymPlans] = useState<GymPlan[]>([])
@@ -324,6 +338,36 @@ export default function GymOwnerDashboard() {
       )
     } catch (error) {
       console.error('Error loading visible members:', error)
+    }
+  }
+
+  // Add function to load today's check-ins
+  const loadTodaysCheckIns = async () => {
+    try {
+      if (!gymId) return
+      
+      const today = new Date().toDateString()
+      const todayStart = new Date(today).toISOString()
+      const todayEnd = new Date(new Date(today).getTime() + 24 * 60 * 60 * 1000).toISOString()
+      
+      const { data: checkIns, error } = await supabase
+        .from('check_ins')
+        .select('id')
+        .eq('gym_id', gymId)
+        .gte('check_in_time', todayStart)
+        .lt('check_in_time', todayEnd)
+      
+      if (error) {
+        console.error('Error fetching today\'s check-ins:', error)
+        return
+      }
+      
+      setGymData(prev => ({
+        ...prev,
+        todaysCheckIns: checkIns?.length || 0
+      }))
+    } catch (error) {
+      console.error('Error loading today\'s check-ins:', error)
     }
   }
 
@@ -656,6 +700,7 @@ export default function GymOwnerDashboard() {
     if (gymId) {
       loadSubscriptionData()
       loadVisibleMembers()
+      loadTodaysCheckIns()
     }
   }, [gymId])
 
@@ -1142,43 +1187,22 @@ export default function GymOwnerDashboard() {
       })
 
       let json: any
-      const ct = res.headers.get("content-type") || ""
-      if (ct.includes("application/json")) {
+      try {
         json = await res.json()
-      } else {
-        const text = await res.text()
-        try {
-          json = JSON.parse(text)
-        } catch {
-          json = { error: text || "Server returned a non-JSON response" }
-        }
+      } catch {
+        throw new Error("Invalid response from server")
       }
 
-      if (!res.ok || !json.success) {
-        throw new Error(json.error || "Failed to create member")
+      if (!res.ok) {
+        throw new Error(json.error || "Failed to create member account")
       }
 
-      const newUserId = json.user.id
-
-      // Update membership with the selected plan_id and dates
-      const startDate = new Date()
-      let months = 1
-      if (typeof selectedPlan.duration === "string") {
-        const match = selectedPlan.duration.match(/(\d+)\s*months?/i)
-        if (match) {
-          months = Number(match[1])
-        } else {
-          const d = selectedPlan.duration.toLowerCase()
-          if (d === "monthly") months = 1
-          else if (d === "quarterly") months = 3
-          else if (d === "yearly") months = 12
-        }
+      const newUserId = json.user?.id
+      if (!newUserId) {
+        throw new Error("User creation failed - no user ID returned")
       }
-      const end = new Date(startDate)
-      end.setMonth(end.getMonth() + months)
-      const expiryDate = end.toISOString().split("T")[0]
 
-      // Find membership row for the user
+      // Get the membership that was created
       const { data: membership } = await supabase
         .from("memberships")
         .select("id")
@@ -1187,10 +1211,69 @@ export default function GymOwnerDashboard() {
         .single()
 
       if (membership) {
+        // Calculate plan dates
+        const startDate = new Date()
+        const expiryDate = new Date()
+        if (selectedPlan.duration === "monthly") {
+          expiryDate.setMonth(expiryDate.getMonth() + 1)
+        } else {
+          const months = parseInt(selectedPlan.duration.split(" ")[0]) || 1
+          expiryDate.setMonth(expiryDate.getMonth() + months)
+        }
+        const expiryDateStr = expiryDate.toISOString().split("T")[0]
+
+        // Update membership with plan details
         await supabase
           .from("memberships")
-          .update({ plan_id: selectedPlan.id, start_date: startDate.toISOString().split("T")[0], expiry_date: expiryDate })
+          .update({ 
+            plan_id: selectedPlan.id, 
+            start_date: startDate.toISOString().split("T")[0], 
+            expiry_date: expiryDateStr,
+            payment_status: "paid",
+            is_active: true
+          })
           .eq("id", membership.id)
+
+        // Create payment record for the new member with proper validation
+      const paymentData = {
+        user_id: newUserId,
+        gym_id: gymId,
+        membership_id: membership.id,
+        amount_inr: Number(selectedPlan.price) || 0,
+        payment_method: "cash", // Default to cash for manually added members
+        payment_status: "completed",
+        payment_date: new Date().toISOString(),
+        transaction_id: `MANUAL_${Date.now()}_${newUserId.slice(-8)}`, // Shorter transaction ID
+      }
+
+      // Validate required fields before insertion
+      if (!paymentData.user_id || !paymentData.gym_id || !paymentData.membership_id) {
+        throw new Error("Missing required payment data: user_id, gym_id, or membership_id")
+      }
+
+      const { error: paymentError } = await supabase.from("payments").insert(paymentData)
+
+      if (paymentError) {
+        console.error("Error creating payment record:", {
+          error: paymentError,
+          message: paymentError.message,
+          details: paymentError.details,
+          hint: paymentError.hint,
+          code: paymentError.code,
+          paymentData: paymentData
+        })
+        // Don't throw error here as member is already created, but show warning
+        toast({
+          title: "Warning",
+          description: "Member created but payment record failed. Please update payment manually.",
+          variant: "destructive",
+        })
+      } else {
+        // Refresh revenue data if revenue tab is active
+        if (activeTab === "revenue") {
+          await loadEnhancedRevenueData(revenueTimeFilter)
+        }
+      }
       }
 
       // Update UI state
@@ -1206,8 +1289,8 @@ export default function GymOwnerDashboard() {
           status: "active",
           lastVisit: "",
           joinDate: startDate.toISOString().split("T")[0],
-          planEndDate: expiryDate,
-          paymentStatus: "pending",
+          planEndDate: expiryDateStr,
+          paymentStatus: "paid", // Set as paid since we created payment record
           totalVisits: 0,
           weeklyVisits: 0,
           currentStreak: 0,
@@ -1222,10 +1305,15 @@ export default function GymOwnerDashboard() {
 
       toast({
         title: "Member added successfully! 🎉",
-        description: `Account created for ${newMember.name}. Default password: 123456. They can login with their phone number.`,
+        description: `Account created for ${newMember.name} with ${selectedPlan.name} plan. Payment record created. Default password: 123456.`,
       })
     } catch (err: any) {
-      toast({ title: "Failed to add member", description: err.message || "", variant: "destructive" })
+      console.error("Full addMember error:", err)
+      toast({ 
+        title: "Failed to add member", 
+        description: err.message || "An unexpected error occurred", 
+        variant: "destructive" 
+      })
     }
   }
 
@@ -1396,6 +1484,8 @@ export default function GymOwnerDashboard() {
       newPlan: member.plan,
       paymentMode: "", // default to placeholder "Select" when opening
     })
+    setIsEditingPayment(false)
+    setOriginalPlanEndDate(member.planEndDate)
     setPaymentModalOpen(true)
   }
 
@@ -1509,6 +1599,125 @@ export default function GymOwnerDashboard() {
   const openCoinsModal = (member: any) => {
     setSelectedMemberForCoins(member)
     setCoinModalOpen(true)
+  }
+
+  // Member deletion functions
+  const openMemberDeleteDialog = (member: any) => {
+    setMemberToDelete(member)
+    setMemberDeleteConfirmOpen(true)
+  }
+  
+  const handleFirstConfirmation = () => {
+    setMemberDeleteConfirmOpen(false)
+    setMemberSecondConfirmOpen(true)
+  }
+  
+  const handleSecondConfirmation = async () => {
+    if (!memberToDelete || !gymId) return
+    
+    setIsDeletingMember(true)
+    
+    try {
+      // Delete member's membership record
+      const { error: membershipError } = await supabase
+        .from('memberships')
+        .delete()
+        .eq('user_id', memberToDelete.id)
+        .eq('gym_id', gymId)
+      
+      if (membershipError) throw membershipError
+      
+      // Delete related records (payments, check-ins, coin transactions)
+      await Promise.all([
+        supabase.from('payments').delete().eq('user_id', memberToDelete.id).eq('gym_id', gymId),
+        supabase.from('check_ins').delete().eq('user_id', memberToDelete.id).eq('gym_id', gymId),
+        supabase.from('coin_transactions').delete().eq('user_id', memberToDelete.id).eq('gym_id', gymId)
+      ])
+      
+      // Update UI state
+      setMembers(prev => prev.filter(member => member.id !== memberToDelete.id))
+      
+      // Refresh data
+      await loadSubscriptionData()
+      await loadVisibleMembers()
+      
+      toast({
+        title: "Member Deleted Successfully",
+        description: `${memberToDelete.name} has been removed from your gym.`,
+      })
+      
+    } catch (error: any) {
+      console.error('Error deleting member:', error)
+      toast({
+        title: "Failed to Delete Member",
+        description: error.message || "Please try again.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsDeletingMember(false)
+      setMemberSecondConfirmOpen(false)
+      setMemberToDelete(null)
+    }
+  }
+  
+  const cancelMemberDeletion = () => {
+    setMemberDeleteConfirmOpen(false)
+    setMemberSecondConfirmOpen(false)
+    setMemberToDelete(null)
+  }
+  
+  // Payment dialog edit functions
+  const toggleEditMode = () => {
+    if (!isEditingPayment) {
+      setOriginalPlanEndDate(paymentData.planEndDate)
+    }
+    setIsEditingPayment(!isEditingPayment)
+  }
+  
+  const validateDateFormat = (dateString: string): boolean => {
+    const ddmmyyyyRegex = /^(0[1-9]|[12][0-9]|3[01])-(0[1-9]|1[0-2])-(\d{4})$/
+    return ddmmyyyyRegex.test(dateString)
+  }
+  
+  const convertDateFormat = (ddmmyyyy: string): string => {
+    const [day, month, year] = ddmmyyyy.split('-')
+    return `${year}-${month}-${day}`
+  }
+  
+  const convertToDisplayFormat = (yyyymmdd: string): string => {
+    const [year, month, day] = yyyymmdd.split('-')
+    return `${day}-${month}-${year}`
+  }
+  
+  const validateFutureDate = (dateString: string): boolean => {
+    const inputDate = new Date(dateString)
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    return inputDate > today
+  }
+  
+  const handleDateChange = (value: string) => {
+    if (isEditingPayment) {
+      // If in edit mode, handle DD-MM-YYYY format
+      if (validateDateFormat(value)) {
+        const convertedDate = convertDateFormat(value)
+        if (validateFutureDate(convertedDate)) {
+          setPaymentData(prev => ({ ...prev, planEndDate: convertedDate }))
+        } else {
+          toast({
+            title: "Invalid Date",
+            description: "Plan end date must be in the future.",
+            variant: "destructive",
+          })
+        }
+      } else if (value.length === 10) {
+        toast({
+          title: "Invalid Format",
+          description: "Please use DD-MM-YYYY format.",
+          variant: "destructive",
+        })
+      }
+    }
   }
 
   const handleWalletRecharge = async () => {
@@ -1833,7 +2042,7 @@ export default function GymOwnerDashboard() {
 
             {/* Overview Tab */}
             <TabsContent value="overview" className="space-y-6">
-              {/* Stats Grid */}
+              {/* Updated Stats Grid - Only show Total Members and Today's Check-ins */}
               <div className="grid grid-cols-2 gap-4">
                 <Card className="bg-gray-800/50 border border-gray-700 backdrop-blur-sm hover:bg-gray-800/70 transition-all duration-300">
                   <CardContent className="p-6">
@@ -1853,39 +2062,11 @@ export default function GymOwnerDashboard() {
                   <CardContent className="p-6">
                     <div className="flex items-center gap-3">
                       <div className="p-3 bg-gradient-to-r from-green-600 to-green-700 rounded-full">
-                        <IndianRupee className="h-6 w-6 text-white" />
+                        <CheckCircle className="h-6 w-6 text-white" />
                       </div>
                       <div>
-                        <p className="text-3xl font-bold text-white">₹{safeFormatRevenueL(gymData.monthlyRevenue)}L</p>
-                        <p className="text-sm text-gray-300">Monthly Revenue</p>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-
-                <Card className="bg-gray-800/50 border border-gray-700 backdrop-blur-sm hover:bg-gray-800/70 transition-all duration-300">
-                  <CardContent className="p-6">
-                    <div className="flex items-center gap-3">
-                      <div className="p-3 bg-gradient-to-r from-blue-600 to-blue-700 rounded-full">
-                        <TrendingUp className="h-6 w-6 text-white" />
-                      </div>
-                      <div>
-                        <p className="text-3xl font-bold text-white">{safeFormatGrowth(gymData.revenueGrowth)}%</p>
-                        <p className="text-sm text-gray-300">Growth</p>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-
-                <Card className="bg-gray-800/50 border border-gray-700 backdrop-blur-sm hover:bg-gray-800/70 transition-all duration-300">
-                  <CardContent className="p-6">
-                    <div className="flex items-center gap-3">
-                      <div className="p-3 bg-gradient-to-r from-purple-600 to-purple-700 rounded-full">
-                        <UserPlus className="h-6 w-6 text-white" />
-                      </div>
-                      <div>
-                        <p className="text-3xl font-bold text-white">{gymData.newMembersThisMonth || 0}</p>
-                        <p className="text-sm text-gray-300">New Members</p>
+                        <p className="text-3xl font-bold text-white">{gymData.todaysCheckIns || 0}</p>
+                        <p className="text-sm text-gray-300">Today's Check-ins</p>
                       </div>
                     </div>
                   </CardContent>
@@ -2227,6 +2408,13 @@ export default function GymOwnerDashboard() {
                                 <Coins className="h-3 w-3 mr-1 flex-shrink-0" />
                                 <span className="truncate">Add Coins</span>
                               </Button>
+                              <Button
+                                onClick={() => openMemberDeleteDialog(member)}
+                                size="sm"
+                                className="bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white border-0 px-2 py-2 text-xs"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
                             </div>
                           </div>
                         </div>
@@ -2262,6 +2450,79 @@ export default function GymOwnerDashboard() {
                   </div>
                 </DialogContent>
               </Dialog>
+
+              {/* First Member Delete Confirmation Dialog */}
+              <Dialog open={memberDeleteConfirmOpen} onOpenChange={setMemberDeleteConfirmOpen}>
+                <DialogContent className="bg-gray-800 border-gray-700 max-w-md">
+                  <DialogHeader>
+                    <DialogTitle className="text-white flex items-center gap-2">
+                      <AlertTriangle className="h-5 w-5 text-red-500" />
+                      Delete Member
+                    </DialogTitle>
+                    <DialogDescription className="text-gray-400">
+                      Are you sure you want to delete {memberToDelete?.name}?
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="flex gap-2 pt-4">
+                    <Button
+                      onClick={cancelMemberDeletion}
+                      variant="outline"
+                      className="flex-1 border-gray-600 hover:bg-gray-700 text-white"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={handleFirstConfirmation}
+                      className="flex-1 bg-red-600 hover:bg-red-700 text-white"
+                    >
+                      Yes, Delete
+                    </Button>
+                  </div>
+                </DialogContent>
+              </Dialog>
+
+              {/* Second Member Delete Confirmation Dialog */}
+              <Dialog open={memberSecondConfirmOpen} onOpenChange={setMemberSecondConfirmOpen}>
+                <DialogContent className="bg-gray-800 border-gray-700 max-w-md">
+                  <DialogHeader>
+                    <DialogTitle className="text-white flex items-center gap-2">
+                      <AlertTriangle className="h-5 w-5 text-red-500" />
+                      Final Confirmation
+                    </DialogTitle>
+                    <DialogDescription className="text-gray-400">
+                      This action cannot be undone. Confirm deletion of {memberToDelete?.name}?
+                      <br /><br />
+                      <span className="text-red-400 font-medium">
+                        All member data, payments, check-ins, and coins will be permanently deleted.
+                      </span>
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="flex gap-2 pt-4">
+                    <Button
+                      onClick={cancelMemberDeletion}
+                      variant="outline"
+                      className="flex-1 border-gray-600 hover:bg-gray-700 text-white"
+                      disabled={isDeletingMember}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={handleSecondConfirmation}
+                      className="flex-1 bg-red-600 hover:bg-red-700 text-white"
+                      disabled={isDeletingMember}
+                    >
+                      {isDeletingMember ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Deleting...
+                        </>
+                      ) : (
+                        'Confirm Deletion'
+                      )}
+                    </Button>
+                  </div>
+                </DialogContent>
+              </Dialog>
             </TabsContent>
 
             <Dialog open={paymentModalOpen} onOpenChange={setPaymentModalOpen}>
@@ -2270,6 +2531,15 @@ export default function GymOwnerDashboard() {
                   <DialogTitle className="text-white flex items-center gap-2">
                     <CreditCard className="h-5 w-5 text-blue-500" />
                     Manage Payment & Plan
+                    <Button
+                      onClick={toggleEditMode}
+                      size="sm"
+                      variant="outline"
+                      className="ml-auto border-gray-600 text-gray-300 hover:bg-gray-700 hover:text-white"
+                    >
+                      <Edit className="h-3 w-3 mr-1" />
+                      {isEditingPayment ? 'Cancel Edit' : 'Edit'}
+                    </Button>
                   </DialogTitle>
                   <DialogDescription className="text-gray-400">
                     Update payment status and plan details for {selectedMemberForPayment?.name}
@@ -2355,20 +2625,37 @@ export default function GymOwnerDashboard() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="planEndDate" className="text-white">
+                    <Label htmlFor="planEndDate" className="text-white flex items-center gap-2">
                       Current Plan End Date
+                      {isEditingPayment && (
+                        <Badge variant="secondary" className="text-xs">
+                          DD-MM-YYYY
+                        </Badge>
+                      )}
                     </Label>
-                    <Input
-                      id="planEndDate"
-                      type="date"
-                      value={paymentData.planEndDate}
-                      onChange={(e) => setPaymentData((prev) => ({ ...prev, planEndDate: e.target.value }))}
-                      className="bg-gray-700 border-gray-600 text-white"
-                      disabled
-                    />
+                    {isEditingPayment ? (
+                      <Input
+                        id="planEndDate"
+                        type="text"
+                        placeholder="DD-MM-YYYY"
+                        value={paymentData.planEndDate ? convertToDisplayFormat(paymentData.planEndDate) : ''}
+                        onChange={(e) => handleDateChange(e.target.value)}
+                        className="bg-gray-700 border-gray-600 text-white"
+                        maxLength={10}
+                      />
+                    ) : (
+                      <Input
+                        id="planEndDate"
+                        type="date"
+                        value={paymentData.planEndDate}
+                        className="bg-gray-700 border-gray-600 text-white"
+                        disabled
+                      />
+                    )}
                     <p className="text-xs text-gray-400">
-                      Plan will be automatically extended based on selected plan duration when payment is marked as
-                      paid.
+                      {isEditingPayment
+                        ? "Enter date in DD-MM-YYYY format. Date must be in the future."
+                        : "Plan will be automatically extended based on selected plan duration when payment is marked as paid."}
                     </p>
                   </div>
                 </div>
@@ -2381,7 +2668,10 @@ export default function GymOwnerDashboard() {
                   </Button>
                   <Button
                     variant="outline"
-                    onClick={() => setPaymentModalOpen(false)}
+                    onClick={() => {
+                      setPaymentModalOpen(false)
+                      setIsEditingPayment(false)
+                    }}
                     className="flex-1 bg-transparent border-gray-600 text-gray-300 hover:bg-gray-700 hover:text-white"
                   >
                     Cancel
