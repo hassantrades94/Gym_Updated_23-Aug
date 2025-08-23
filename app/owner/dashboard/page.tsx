@@ -134,6 +134,7 @@ export default function GymOwnerDashboard() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [planToDelete, setPlanToDelete] = useState<string | null>(null)
   const [isAddingMember, setIsAddingMember] = useState(false)
+  const [isAddingMemberLoading, setIsAddingMemberLoading] = useState(false)
   const [editingMember, setEditingMember] = useState<any>(null)
   const [bonusCoinsInput, setBonusCoinsInput] = useState<{ [key: number]: string }>({})
   const [activeTab, setActiveTab] = useState("overview")
@@ -1440,6 +1441,9 @@ export default function GymOwnerDashboard() {
       return
     }
 
+    // Set loading state
+    setIsAddingMemberLoading(true)
+
     try {
       // Find selected plan id
       const selectedPlan = gymPlans.find((p) => p.name === newMember.plan)
@@ -1589,6 +1593,9 @@ export default function GymOwnerDashboard() {
         description: err.message || "An unexpected error occurred", 
         variant: "destructive" 
       })
+    } finally {
+      // Reset loading state
+      setIsAddingMemberLoading(false)
     }
   }
 
@@ -2592,15 +2599,24 @@ export default function GymOwnerDashboard() {
                         <div className="flex gap-2">
                           <Button
                             onClick={addMember}
-                            className="flex-1 bg-transparent border-white text-white hover:bg-white hover:text-gray-900"
+                            disabled={isAddingMemberLoading}
+                            className="flex-1 bg-transparent border-white text-white hover:bg-white hover:text-gray-900 disabled:opacity-50 disabled:cursor-not-allowed"
                             variant="outline"
                           >
-                            Add Member
+                            {isAddingMemberLoading ? (
+                              <>
+                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                Adding Member
+                              </>
+                            ) : (
+                              "Add Member"
+                            )}
                           </Button>
                           <Button
                             variant="outline"
                             onClick={() => setIsAddingMember(false)}
-                            className="flex-1 bg-transparent border-white text-white hover:bg-white hover:text-gray-900"
+                            disabled={isAddingMemberLoading}
+                            className="flex-1 bg-transparent border-white text-white hover:bg-white hover:text-gray-900 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             Cancel
                           </Button>
@@ -3665,7 +3681,7 @@ export default function GymOwnerDashboard() {
                   key={amount}
                   variant="outline"
                   onClick={() => setRechargeAmount(amount.toString())}
-                  className="border-gray-600 hover:bg-gray-700 hover:text-white text-black"
+                  className="border-gray-600 hover:bg-gray-700 hover:text-white text-white"
                 >
                   ₹{amount}
                 </Button>
@@ -3679,7 +3695,7 @@ export default function GymOwnerDashboard() {
                   setWalletModalOpen(false)
                   setRechargeAmount("")
                 }}
-                className="flex-1 border-gray-600 hover:bg-gray-700 text-black"
+                className="flex-1 border-gray-600 hover:bg-gray-700 text-white"
               >
                 Cancel
               </Button>
