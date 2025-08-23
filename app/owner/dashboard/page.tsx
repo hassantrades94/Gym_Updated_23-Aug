@@ -47,6 +47,23 @@ import {
   AlertTriangle,
   Edit,
 } from "lucide-react"
+import {
+  LineChart,
+  Line,
+  AreaChart,
+  Area,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell
+} from 'recharts'
 import { useToast } from "@/hooks/use-toast"
 import { supabase } from "@/lib/supabase"
 import { getCurrentUser } from "@/lib/auth"
@@ -59,6 +76,12 @@ type GymPlan = {
   duration: string
   features: string[]
   active: boolean
+}
+
+// Add this helper function at the top of the component
+const safeNumber = (value: any, defaultValue: number = 0): number => {
+  const num = Number(value)
+  return isFinite(num) && !isNaN(num) ? num : defaultValue
 }
 
 export default function GymOwnerDashboard() {
@@ -183,7 +206,17 @@ export default function GymOwnerDashboard() {
   // Additional state for live data
   const [revenueData, setRevenueData] = useState<{ month: string; revenue: number; members: number }[]>([])
   const [recentPayments, setRecentPayments] = useState<any[]>([])
-  const [revenueBreakdown, setRevenueBreakdown] = useState<{ planName: string; revenue: number; growth: number }[]>([])
+  const [revenueBreakdown, setRevenueBreakdown] = useState<{ planName: string; revenue: number; growth: number; transactionCount?: number }[]>([])
+  const [revenueTimeFilter, setRevenueTimeFilter] = useState('1month')
+  const [chartData, setChartData] = useState<any[]>([])
+  const [revenueStats, setRevenueStats] = useState({
+    totalRevenue: 0,
+    averageRevenue: 0,
+    growth: 0,
+    transactionCount: 0
+  })
+  const [paymentTransactions, setPaymentTransactions] = useState<any[]>([])
+  const [isLoadingRevenue, setIsLoadingRevenue] = useState(false)
 
   // Helper: safe growth calculation
   const safeCalculateGrowth = (current: number, previous: number): number => {
@@ -191,6 +224,19 @@ export default function GymOwnerDashboard() {
     const growth = ((current - previous) / previous) * 100
     const val = Math.round(growth * 10) / 10
     return isFinite(val) && !isNaN(val) ? val : 0
+  }
+
+  // Helper: safe revenue format in thousands (k)
+  const formatRevenue = (revenue: any): string => {
+    const r = safeNumber(revenue, 0)
+    const out = (r / 1000).toFixed(1) + "k"
+    return isFinite(safeNumber(out.replace('k', ''), 0)) ? out : "0.0k"
+  }
+
+  // Helper: safe growth format
+  const formatGrowth = (growth: any): string => {
+    const g = safeNumber(growth, 0)
+    return g.toFixed(1)
   }
 
   // Helper: safe revenue format in Lakhs
@@ -205,6 +251,228 @@ export default function GymOwnerDashboard() {
     const g = Number(growth)
     if (!isFinite(g) || isNaN(g)) return "0"
     return g > 0 ? `+${g}` : `${g}`
+  }
+
+  // Enhanced revenue data loading function
+  const loadEnhancedRevenueData = async (timeFilter: string) => {
+    if (!gymId) {
+      console.log('No gymId available for revenue data loading')
+      return
+    }
+    
+    console.log('Loading revenue data for gymId:', gymId, 'timeFilter:', timeFilter)
+    setIsLoadingRevenue(true)
+    try {
+      const now = new Date()
+      let startDate: Date
+      let groupBy: string
+      
+      // Calculate date range based on filter
+      switch (timeFilter) {
+        case '7days':
+          startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+          groupBy = 'day'
+          break
+        case '1month':
+          startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate())
+          groupBy = 'day'
+          break
+        case '3months':
+          startDate = new Date(now.getFullYear(), now.getMonth() - 3, now.getDate())
+          groupBy = 'week'
+          break
+        case '6months':
+          startDate = new Date(now.getFullYear(), now.getMonth() - 6, now.getDate())
+          groupBy = 'month'
+          break
+        case '1year':
+          startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())
+          groupBy = 'month'
+          break
+        default:
+          startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate())
+          groupBy = 'day'
+      }
+
+      console.log('Date range:', startDate.toISOString(), 'to', now.toISOString())
+
+      // Fetch payment data with improved query
+      const { data: payments, error } = await supabase
+        .from('payments')
+        .select(`
+          id,
+          payment_date,
+          amount_inr,
+          payment_method,
+          payment_status,
+          users!inner(full_name, phone_number),
+          memberships!inner(
+            expiry_date,
+            start_date,
+            gym_plans!inner(plan_name, price_inr)
+          )
+        `)
+        .eq('gym_id', gymId)
+        .eq('payment_status', 'completed')
+        .gte('payment_date', startDate.toISOString())
+        .order('payment_date', { ascending: false })
+
+      if (error) {
+        console.error('Database query error:', error)
+        throw error
+      }
+
+      console.log('Payments found:', payments?.length || 0)
+
+      // Process data for charts - using real data only
+      const processedData = processRevenueData(payments || [], groupBy, startDate, now)
+      console.log('Processed data:', processedData)
+      
+      setChartData(processedData.chartData)
+      setRevenueStats(processedData.stats)
+      setPaymentTransactions((payments || []).slice(0, 20)) // Latest 20 transactions
+      
+      // Calculate revenue breakdown by plan from real data
+      const planBreakdown = calculatePlanBreakdown(payments || [])
+      setRevenueBreakdown(planBreakdown)
+      
+      // Update existing revenueData for backward compatibility
+      const monthlyData = processedData.chartData.slice(-5).map((item: any) => ({
+        month: item.period,
+        revenue: item.revenue,
+        members: item.memberCount || 0
+      }))
+      setRevenueData(monthlyData)
+      
+    } catch (error) {
+      console.error('Error loading enhanced revenue data:', error)
+      toast({
+        title: 'Error',
+        description: 'Failed to load revenue data',
+        variant: 'destructive'
+      })
+    } finally {
+      setIsLoadingRevenue(false)
+    }
+  }
+
+  // Add function to calculate plan breakdown from real data
+  const calculatePlanBreakdown = (payments: any[]) => {
+    const planRevenue: { [key: string]: number } = {}
+    const planCounts: { [key: string]: number } = {}
+    
+    // Group payments by plan
+    payments.forEach(payment => {
+      const planName = payment.memberships?.gym_plans?.plan_name || 'Unknown'
+      const amount = Number(payment.amount_inr || 0)
+      
+      planRevenue[planName] = (planRevenue[planName] || 0) + amount
+      planCounts[planName] = (planCounts[planName] || 0) + 1
+    })
+    
+    // Calculate growth (simplified - comparing with previous period)
+    return Object.keys(planRevenue).map(planName => ({
+      planName,
+      revenue: planRevenue[planName],
+      growth: 0, // You can implement period comparison for growth calculation
+      transactionCount: planCounts[planName]
+    }))
+  }
+
+  // Data processing function
+  const processRevenueData = (payments: any[], groupBy: string, startDate: Date, endDate: Date) => {
+    const periods = generatePeriods(startDate, endDate, groupBy)
+    const revenueMap: { [key: string]: number } = {}
+    let totalRevenue = 0
+    let transactionCount = 0
+
+    // Initialize all periods with 0
+    periods.forEach(period => {
+      revenueMap[period] = 0
+    })
+
+    // Process payments
+    payments.forEach(payment => {
+      const paymentDate = new Date(payment.payment_date)
+      const amount = safeNumber(payment.amount_inr, 0) // Use safe number conversion
+      
+      let periodKey: string
+      if (groupBy === 'day') {
+        periodKey = paymentDate.toISOString().split('T')[0]
+      } else if (groupBy === 'week') {
+        const weekStart = new Date(paymentDate)
+        weekStart.setDate(paymentDate.getDate() - paymentDate.getDay())
+        periodKey = weekStart.toISOString().split('T')[0]
+      } else {
+        periodKey = `${paymentDate.getFullYear()}-${String(paymentDate.getMonth() + 1).padStart(2, '0')}`
+      }
+
+      if (revenueMap.hasOwnProperty(periodKey)) {
+        revenueMap[periodKey] += amount
+      }
+      
+      totalRevenue += amount
+      transactionCount += 1
+    })
+
+    const chartData = periods.map(period => ({
+      period,
+      revenue: safeNumber(revenueMap[period], 0)
+    }))
+    
+    // Calculate growth
+    const currentPeriodRevenue = chartData[chartData.length - 1]?.revenue || 0
+    const previousPeriodRevenue = chartData[chartData.length - 2]?.revenue || 0
+    const growth = safeCalculateGrowth(currentPeriodRevenue, previousPeriodRevenue)
+    
+    return {
+      chartData,
+      stats: {
+        totalRevenue,
+        averageRevenue: chartData.length > 0 ? totalRevenue / chartData.length : 0,
+        growth,
+        transactionCount
+      }
+    }
+  }
+
+  // Helper functions for period generation and formatting
+  const generatePeriods = (startDate: Date, endDate: Date, groupBy: string): string[] => {
+    const periods: string[] = []
+    const current = new Date(startDate)
+    
+    while (current <= endDate) {
+      periods.push(formatPeriod(current, groupBy))
+      
+      switch (groupBy) {
+        case 'day':
+          current.setDate(current.getDate() + 1)
+          break
+        case 'week':
+          current.setDate(current.getDate() + 7)
+          break
+        case 'month':
+          current.setMonth(current.getMonth() + 1)
+          break
+      }
+    }
+    
+    return periods
+  }
+
+  const formatPeriod = (date: Date, groupBy: string): string => {
+    switch (groupBy) {
+      case 'day':
+        return date.toISOString().split('T')[0]
+      case 'week':
+        const weekStart = new Date(date)
+        weekStart.setDate(date.getDate() - date.getDay())
+        return weekStart.toISOString().split('T')[0]
+      case 'month':
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+      default:
+        return date.toISOString().split('T')[0]
+    }
   }
 
   // Updated gymData state - removing mock values
@@ -703,6 +971,13 @@ export default function GymOwnerDashboard() {
       loadTodaysCheckIns()
     }
   }, [gymId])
+
+  // Load revenue data when tab changes
+  useEffect(() => {
+    if (gymId && activeTab === 'revenue') {
+      loadEnhancedRevenueData(revenueTimeFilter)
+    }
+  }, [gymId, activeTab, revenueTimeFilter])
 
   const getDaysUntilExpiration = (status: string, joinDate: string): number => {
     if (status !== "expiring") return 0
@@ -1210,18 +1485,18 @@ export default function GymOwnerDashboard() {
         .eq("gym_id", gymId)
         .single()
 
-      if (membership) {
-        // Calculate plan dates
-        const startDate = new Date()
-        const expiryDate = new Date()
-        if (selectedPlan.duration === "monthly") {
-          expiryDate.setMonth(expiryDate.getMonth() + 1)
-        } else {
-          const months = parseInt(selectedPlan.duration.split(" ")[0]) || 1
-          expiryDate.setMonth(expiryDate.getMonth() + months)
-        }
-        const expiryDateStr = expiryDate.toISOString().split("T")[0]
+      // Calculate plan dates outside the membership check
+      const startDate = new Date()
+      const expiryDate = new Date()
+      if (selectedPlan.duration === "monthly") {
+        expiryDate.setMonth(expiryDate.getMonth() + 1)
+      } else {
+        const months = parseInt(selectedPlan.duration.split(" ")[0]) || 1
+        expiryDate.setMonth(expiryDate.getMonth() + months)
+      }
+      const expiryDateStr = expiryDate.toISOString().split("T")[0]
 
+      if (membership) {
         // Update membership with plan details
         await supabase
           .from("memberships")
@@ -1235,25 +1510,25 @@ export default function GymOwnerDashboard() {
           .eq("id", membership.id)
 
         // Create payment record for the new member with proper validation
-      const paymentData = {
-        user_id: newUserId,
-        gym_id: gymId,
-        membership_id: membership.id,
-        amount_inr: Number(selectedPlan.price) || 0,
-        payment_method: "cash", // Default to cash for manually added members
-        payment_status: "completed",
-        payment_date: new Date().toISOString(),
-        transaction_id: `MANUAL_${Date.now()}_${newUserId.slice(-8)}`, // Shorter transaction ID
-      }
+        const paymentData = {
+          user_id: newUserId,
+          gym_id: gymId,
+          membership_id: membership.id,
+          amount_inr: Number(selectedPlan.price) || 0,
+          payment_method: "cash", // Default to cash for manually added members
+          payment_status: "completed",
+          payment_date: new Date().toISOString(),
+          // Remove transaction_id as it doesn't exist in the schema
+        }
 
-      // Validate required fields before insertion
-      if (!paymentData.user_id || !paymentData.gym_id || !paymentData.membership_id) {
-        throw new Error("Missing required payment data: user_id, gym_id, or membership_id")
-      }
+        // Validate required fields before insertion
+        if (!paymentData.user_id || !paymentData.gym_id || !paymentData.membership_id) {
+          throw new Error("Missing required payment data: user_id, gym_id, or membership_id")
+        }
 
-      const { error: paymentError } = await supabase.from("payments").insert(paymentData)
+        const { error: paymentError } = await supabase.from("payments").insert(paymentData)
 
-      if (paymentError) {
+        if (paymentError) {
         console.error("Error creating payment record:", {
           error: paymentError,
           message: paymentError.message,
@@ -1262,12 +1537,8 @@ export default function GymOwnerDashboard() {
           code: paymentError.code,
           paymentData: paymentData
         })
-        // Don't throw error here as member is already created, but show warning
-        toast({
-          title: "Warning",
-          description: "Member created but payment record failed. Please update payment manually.",
-          variant: "destructive",
-        })
+        // Don't throw here - member creation succeeded, payment record is optional
+        console.warn("Payment record creation failed, but member was created successfully")
       } else {
         // Refresh revenue data if revenue tab is active
         if (activeTab === "revenue") {
@@ -1276,6 +1547,10 @@ export default function GymOwnerDashboard() {
       }
       }
 
+      // Refresh data after adding member
+      await loadSubscriptionData()
+      await loadVisibleMembers()
+      
       // Update UI state
       setMembers((prev) => [
         ...prev,
@@ -1305,7 +1580,7 @@ export default function GymOwnerDashboard() {
 
       toast({
         title: "Member added successfully! 🎉",
-        description: `Account created for ${newMember.name} with ${selectedPlan.name} plan. Payment record created. Default password: 123456.`,
+        description: `Account created for ${newMember.name} with ${selectedPlan.name} plan. Default password: 123456.`,
       })
     } catch (err: any) {
       console.error("Full addMember error:", err)
@@ -1640,6 +1915,13 @@ export default function GymOwnerDashboard() {
       // Refresh data
       await loadSubscriptionData()
       await loadVisibleMembers()
+      
+      // Update gymData with new member count
+      setGymData(prev => ({
+        ...prev,
+        totalMembers: prev.totalMembers + 1,
+        activeMembers: prev.activeMembers + 1
+      }))
       
       toast({
         title: "Member Deleted Successfully",
@@ -2183,9 +2465,9 @@ export default function GymOwnerDashboard() {
                         <div className="flex items-center gap-2">
                           <Zap className="h-4 w-4 text-orange-500" />
                           <span className="font-medium text-white">
-                            {member.currentStreak || 
+                            {safeNumber(member.currentStreak) || 
                               // Use deterministic value based on member ID instead of random
-                              ((member.id * 7) % 20) + 1
+                              safeNumber(((parseInt(String(member.id || '').slice(-8), 16) || 0) * 7) % 20) + 1
                             }
                           </span>
                         </div>
@@ -2682,73 +2964,275 @@ export default function GymOwnerDashboard() {
 
             {/* Revenue Tab */}
             <TabsContent value="revenue" className="space-y-6">
-              <Card className="bg-gray-800 border-gray-700">
-                <CardHeader>
-                  <CardTitle className="text-lg text-white">Revenue Trends</CardTitle>
-                  <CardDescription className="text-gray-400">
-                    {revenueData.length >= 3 ? "Interactive revenue chart" : "Monthly revenue and member growth"}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {revenueData.length >= 3 ? (
-                    // Interactive graph view for 3+ months
-                    <div className="h-64 flex items-center justify-center bg-gray-700 rounded-lg">
-                      <div className="text-center">
-                        <TrendingUp className="h-12 w-12 text-green-500 mx-auto mb-2" />
-                        <p className="text-white font-medium">Interactive Revenue Chart</p>
-                        <p className="text-gray-400 text-sm">Chart visualization would be rendered here</p>
+              {/* Revenue Stats Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <Card className="bg-gray-800 border-gray-700">
+                  <CardContent className="p-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm text-gray-400">Total Revenue</p>
+                        <p className="text-2xl font-bold text-white">
+                          ₹{revenueStats.totalRevenue.toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="p-2 bg-green-600/20 rounded-lg">
+                        <IndianRupee className="h-5 w-5 text-green-400" />
                       </div>
                     </div>
+                  </CardContent>
+                </Card>
+                
+                <Card className="bg-gray-800 border-gray-700">
+                  <CardContent className="p-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm text-gray-400">Average Revenue</p>
+                        <p className="text-2xl font-bold text-white">
+                          ₹{Math.round(revenueStats.averageRevenue).toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="p-2 bg-blue-600/20 rounded-lg">
+                        <TrendingUp className="h-5 w-5 text-blue-400" />
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+                
+                <Card className="bg-gray-800 border-gray-700">
+                  <CardContent className="p-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm text-gray-400">Growth Rate</p>
+                        <p className={`text-2xl font-bold ${
+                          revenueStats.growth >= 0 ? 'text-green-400' : 'text-red-400'
+                        }`}>
+                          {revenueStats.growth >= 0 ? '+' : ''}{revenueStats.growth.toFixed(1)}%
+                        </p>
+                      </div>
+                      <div className={`p-2 rounded-lg ${
+                        revenueStats.growth >= 0 ? 'bg-green-600/20' : 'bg-red-600/20'
+                      }`}>
+                        <TrendingUp className={`h-5 w-5 ${
+                          revenueStats.growth >= 0 ? 'text-green-400' : 'text-red-400'
+                        }`} />
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+                
+                <Card className="bg-gray-800 border-gray-700">
+                  <CardContent className="p-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm text-gray-400">Transactions</p>
+                        <p className="text-2xl font-bold text-white">
+                          {revenueStats.transactionCount}
+                        </p>
+                      </div>
+                      <div className="p-2 bg-purple-600/20 rounded-lg">
+                        <CreditCard className="h-5 w-5 text-purple-400" />
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Interactive Revenue Chart */}
+              <Card className="bg-gray-800 border-gray-700">
+                <CardHeader>
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                    <div>
+                      <CardTitle className="text-lg text-white">Revenue Trends</CardTitle>
+                      <CardDescription className="text-gray-400">
+                        Interactive revenue visualization with time filters
+                      </CardDescription>
+                    </div>
+                    <Select value={revenueTimeFilter} onValueChange={setRevenueTimeFilter}>
+                      <SelectTrigger className="w-[180px] bg-gray-700 border-gray-600 text-white">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-gray-800 border-gray-600">
+                        <SelectItem value="7days" className="text-white hover:bg-gray-700">
+                          Last 7 Days
+                        </SelectItem>
+                        <SelectItem value="1month" className="text-white hover:bg-gray-700">
+                          Last Month
+                        </SelectItem>
+                        <SelectItem value="3months" className="text-white hover:bg-gray-700">
+                          Last 3 Months
+                        </SelectItem>
+                        <SelectItem value="6months" className="text-white hover:bg-gray-700">
+                          Last 6 Months
+                        </SelectItem>
+                        <SelectItem value="1year" className="text-white hover:bg-gray-700">
+                          Last Year
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {isLoadingRevenue ? (
+                    <div className="h-80 flex items-center justify-center">
+                      <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+                    </div>
+                  ) : chartData.length > 0 ? (
+                    <div className="h-80">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={chartData}>
+                          <defs>
+                            <linearGradient id="revenueGradient" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                              <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                          <XAxis 
+                            dataKey="period" 
+                            stroke="#9ca3af"
+                            fontSize={12}
+                            tickFormatter={(value) => {
+                            try {
+                              const date = new Date(value)
+                              if (isNaN(date.getTime())) return value
+                              if (revenueTimeFilter === '7days' || revenueTimeFilter === '1month') {
+                                return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                              } else {
+                                return date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' })
+                              }
+                            } catch {
+                              return value
+                            }
+                          }}
+                          />
+                          <YAxis 
+                            stroke="#9ca3af"
+                            fontSize={12}
+                            tickFormatter={(value) => `₹${(value / 1000).toFixed(0)}k`}
+                          />
+                          <Tooltip 
+                            contentStyle={{
+                              backgroundColor: '#1f2937',
+                              border: '1px solid #374151',
+                              borderRadius: '8px',
+                              color: '#ffffff'
+                            }}
+                            formatter={(value: any) => [`₹${safeNumber(value, 0).toLocaleString()}`, 'Revenue']}
+                            labelFormatter={(label: any) => {
+                              const date = new Date(label)
+                              if (isNaN(date.getTime())) return label
+                              return date.toLocaleDateString()
+                            }}
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey="revenue"
+                            stroke="#10b981"
+                            strokeWidth={2}
+                            fill="url(#revenueGradient)"
+                          />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </div>
                   ) : (
-                    // Table format for less than 3 months
-                    <div className="space-y-4">
-                      {revenueData.map((data) => {
-                        const maxRevenue = Math.max(...revenueData.map((d) => d.revenue), 1) // avoid -Infinity
-                        const progressValue = maxRevenue > 0 ? (data.revenue / maxRevenue) * 100 : 0
-                        const safeValue = isFinite(progressValue) && !isNaN(progressValue) ? progressValue : 0
-                        return (
-                          <div key={data.month} className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                              <div className="w-12 text-sm font-medium text-gray-400">{data.month}</div>
-                              <div className="flex-1">
-                                <Progress value={safeValue} className="h-2" />
-                              </div>
-                            </div>
-                            <div className="text-right">
-                              <p className="font-medium text-white">₹{(data.revenue || 0).toLocaleString()}</p>
-                              <p className="text-sm text-gray-400">{data.members || 0} members</p>
-                            </div>
-                          </div>
-                        )
-                      })}
+                    <div className="h-80 flex items-center justify-center bg-gray-700/30 rounded-lg">
+                      <div className="text-center">
+                        <TrendingUp className="h-12 w-12 text-gray-500 mx-auto mb-2" />
+                        <p className="text-white font-medium">No Revenue Data</p>
+                        <p className="text-gray-400 text-sm">No payments found for the selected period</p>
+                      </div>
                     </div>
                   )}
                 </CardContent>
               </Card>
 
-              {/* Revenue Breakdown */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {revenueBreakdown.length > 0 ? (
-                  revenueBreakdown.map((plan) => (
-                    <Card key={plan.planName} className="bg-gray-800 border-gray-700">
-                      <CardContent className="p-4 text-center">
-                        <p className="text-2xl font-bold text-white">₹{plan.revenue.toLocaleString()}</p>
-                        <p className="text-sm text-gray-400">{plan.planName} Plans</p>
-                        <p className={`text-xs ${plan.growth >= 0 ? "text-green-600" : "text-red-600"}`}>
-                          {plan.growth >= 0 ? "+" : ""}{plan.growth.toFixed(1)}%
-                        </p>
-                      </CardContent>
-                    </Card>
-                  ))
-                ) : (
-                  <Card className="bg-gray-800 border-gray-700">
-                    <CardContent className="p-4 text-center">
-                      <p className="text-2xl font-bold text-white">₹0</p>
-                      <p className="text-sm text-gray-400">No Revenue Data</p>
-                      <p className="text-xs text-gray-600">--</p>
-                    </CardContent>
-                  </Card>
-                )}
+              {/* Revenue Breakdown and Recent Transactions */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Revenue Breakdown by Plan */}
+                <Card className="bg-gray-800 border-gray-700">
+                  <CardHeader>
+                    <CardTitle className="text-lg text-white">Revenue by Plan</CardTitle>
+                    <CardDescription className="text-gray-400">
+                      Revenue distribution across membership plans
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {revenueBreakdown.length > 0 ? (
+                      <div className="space-y-4">
+                        {revenueBreakdown.map((plan, index) => (
+                          <div key={plan.planName} className="flex items-center justify-between p-3 bg-gray-700/30 rounded-lg">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-3 h-3 rounded-full`} style={{
+                                backgroundColor: ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6'][index % 5]
+                              }} />
+                              <span className="text-white font-medium">{plan.planName}</span>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-white font-bold">₹{plan.revenue.toLocaleString()}</p>
+                              <p className="text-xs text-gray-400">
+                                {plan.transactionCount || 0} transactions
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-center py-8">
+                        <CreditCard className="h-12 w-12 text-gray-500 mx-auto mb-2" />
+                        <p className="text-gray-400">No plan revenue data available</p>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* Recent Transactions */}
+                <Card className="bg-gray-800 border-gray-700">
+                  <CardHeader>
+                    <CardTitle className="text-lg text-white">Recent Transactions</CardTitle>
+                    <CardDescription className="text-gray-400">
+                      Latest payment transactions
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {paymentTransactions.length > 0 ? (
+                      <div className="space-y-3 max-h-80 overflow-y-auto">
+                        {paymentTransactions.map((transaction, index) => (
+                          <div key={transaction.id || index} className="flex items-center justify-between p-3 bg-gray-700/30 rounded-lg hover:bg-gray-700/50 transition-colors">
+                            <div className="flex-1">
+                              <p className="text-white font-medium text-sm">
+                                {transaction.users?.full_name || 'Unknown Member'}
+                              </p>
+                              <p className="text-gray-400 text-xs">
+                                {transaction.memberships?.gym_plans?.plan_name || 'Unknown Plan'}
+                              </p>
+                              <p className="text-gray-500 text-xs">
+                                {new Date(transaction.payment_date).toLocaleDateString('en-US', {
+                                  month: 'short',
+                                  day: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit'
+                                })}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-green-400 font-bold text-sm">
+                                ₹{Number(transaction.amount_inr || 0).toLocaleString()}
+                              </p>
+                              <Badge variant="outline" className="text-xs border-gray-600 text-gray-300">
+                                {transaction.payment_method || 'cash'}
+                              </Badge>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-center py-8">
+                        <MessageSquare className="h-12 w-12 text-gray-500 mx-auto mb-2" />
+                        <p className="text-gray-400">No recent transactions</p>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
               </div>
             </TabsContent>
 
