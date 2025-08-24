@@ -199,101 +199,116 @@ export default function MessagesPage() {
     return notifications
   }
 
-  const loadLivePaymentNotifications = async (gymId: string): Promise<Notification[]> => {
+  const loadLivePaymentNotifications = async (gymId: string) => {
     try {
-      // Load all recent payments with comprehensive data
+      // Simplified query to avoid complex joins that might cause timeouts
       const { data: payments, error } = await supabase
-        .from("payments")
+        .from('payments')
         .select(`
           id,
           amount_inr,
           payment_status,
           payment_date,
           created_at,
-          users!inner(
-            id,
-            full_name,
-            phone_number
-          ),
-          memberships!inner(
-            id,
-            gym_plans!inner(
-              id,
-              plan_name,
-              duration_months,
-              price_inr
-            )
-          )
+          membership_id
         `)
-        .eq("gym_id", gymId)
-        .order("payment_date", { ascending: false })
+        .eq('gym_id', gymId)
+        .order('created_at', { ascending: false })
         .limit(50)
 
       if (error) {
-        console.error("Error loading payments:", error)
+        console.error('Error loading payments:', error)
         return []
       }
 
-      const notifications: Notification[] = []
+      if (!payments || payments.length === 0) {
+        return []
+      }
 
-      payments?.forEach((payment) => {
+      // Fetch related data separately to avoid complex joins
+      const membershipIds = payments.map(p => p.membership_id).filter(Boolean)
+      
+      const { data: memberships, error: membershipError } = await supabase
+        .from('memberships')
+        .select(`
+          id,
+          user_id,
+          plan_id,
+          users!inner(full_name),
+          gym_plans!inner(plan_name)
+        `)
+        .in('id', membershipIds)
+
+      if (membershipError) {
+        console.error('Error loading memberships:', membershipError)
+        // Continue with basic payment data even if membership lookup fails
+      }
+
+      // Create notifications with available data
+      const notifications: Notification[] = []
+      
+      for (const payment of payments) {
+        const membership = memberships?.find(m => m.id === payment.membership_id)
+        const userName = membership?.users?.full_name || 'Unknown User'
+        const planName = membership?.gym_plans?.plan_name || 'Unknown Plan'
+
         const paymentDetails: PaymentNotification = {
           id: payment.id,
-          payerName: payment.users.full_name,
-          planName: payment.memberships.gym_plans.plan_name,
+          payerName: userName,
+          planName: planName,
           amount: payment.amount_inr,
           paymentDate: payment.payment_date || payment.created_at,
-          paymentStatus: payment.payment_status as "completed" | "pending" | "failed",
-          subscriptionType: payment.memberships.gym_plans.plan_name,
-          duration: `${payment.memberships.gym_plans.duration_months} months`
+          paymentStatus: payment.payment_status,
+          subscriptionType: planName,
+          duration: '1 month' // Default duration
         }
 
-        // Create notifications based on payment status
+        // Create notification based on payment status
         if (payment.payment_status === "completed") {
           notifications.push({
             id: `payment-success-${payment.id}`,
             title: "Payment Received",
-            message: `₹${payment.amount_inr.toLocaleString()} payment received from ${payment.users.full_name} for ${payment.memberships.gym_plans.plan_name}`,
+            message: `₹${payment.amount_inr.toLocaleString()} payment received from ${userName} for ${planName}`,
             type: "payment",
             priority: "low",
             timestamp: payment.payment_date || payment.created_at,
             isRead: false,
             actionRequired: false,
-            relatedUserName: payment.users.full_name,
+            relatedUserName: userName,
             paymentDetails
           })
         } else if (payment.payment_status === "pending") {
           notifications.push({
             id: `payment-pending-${payment.id}`,
             title: "Pending Payment",
-            message: `Payment of ₹${payment.amount_inr.toLocaleString()} from ${payment.users.full_name} requires approval`,
+            message: `Payment of ₹${payment.amount_inr.toLocaleString()} from ${userName} requires approval`,
             type: "payment",
             priority: "high",
             timestamp: payment.payment_date || payment.created_at,
             isRead: false,
             actionRequired: true,
-            relatedUserName: payment.users.full_name,
+            relatedUserName: userName,
             paymentDetails
           })
         } else if (payment.payment_status === "failed") {
           notifications.push({
             id: `payment-failed-${payment.id}`,
             title: "Payment Failed",
-            message: `Payment of ₹${payment.amount_inr.toLocaleString()} from ${payment.users.full_name} has failed`,
+            message: `Payment of ₹${payment.amount_inr.toLocaleString()} from ${userName} has failed`,
             type: "payment",
-            priority: "urgent",
+            priority: "high",
             timestamp: payment.payment_date || payment.created_at,
             isRead: false,
             actionRequired: true,
-            relatedUserName: payment.users.full_name,
+            relatedUserName: userName,
             paymentDetails
           })
         }
-      })
+      }
 
       return notifications
     } catch (error) {
-      console.error("Error loading live payment notifications:", error)
+      console.error('Error in loadLivePaymentNotifications:', error)
       return []
     }
   }
