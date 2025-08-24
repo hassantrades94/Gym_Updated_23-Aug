@@ -2259,14 +2259,22 @@ export default function GymOwnerDashboard() {
       <header className="fixed top-0 left-0 right-0 z-50 backdrop-blur-xl bg-gradient-to-r from-[#da1c24]/95 via-[#e63946]/95 to-[#da1c24]/95 border-b border-red-700/30 shadow-2xl">
         <div className="max-w-md mx-auto px-4 py-3">
           <div className="flex items-center justify-between">
-            {/* Dynamic Gym Name Section */}
-            <div className="flex flex-col">
-              <h1 className="text-2xl font-bold text-transparent bg-gradient-to-r from-white via-red-100 to-white bg-clip-text tracking-tight">
-                {gymData.gymName || 'Flexio'}
-              </h1>
-              <span className="text-sm text-red-100/80 font-medium tracking-wide">
-                Flexio Gym Manager
-              </span>
+            {/* Company Logo and Gym Name Section */}
+            <div className="flex items-center gap-3">
+              {/* Company Logo - Icon Only with White Border */}
+              <div className="w-10 h-10 bg-gradient-to-br from-red-500 to-red-600 rounded-xl flex items-center justify-center border-2 border-white/90 shadow-lg">
+                <Dumbbell className="h-6 w-6 text-white" />
+              </div>
+              
+              {/* Dynamic Gym Name Section */}
+              <div className="flex flex-col">
+                <h1 className="text-xl font-bold text-transparent bg-gradient-to-r from-white via-red-100 to-white bg-clip-text tracking-tight leading-tight">
+                  {gymData.gymName || 'Flexio'}
+                </h1>
+                <span className="text-xs text-red-100/80 font-medium tracking-wide">
+                  Flexio Gym Manager
+                </span>
+              </div>
             </div>
 
             {/* Modern Action Buttons */}
@@ -2276,9 +2284,13 @@ export default function GymOwnerDashboard() {
                 variant="ghost"
                 size="sm"
                 className="relative text-white hover:bg-white/20 border border-white/20 rounded-xl p-2 transition-all duration-300 hover:scale-105"
+                onClick={() => window.location.href = "/messages"}
               >
                 <Bell className="h-4 w-4" />
-                <div className="absolute -top-1 -right-1 w-3 h-3 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full animate-pulse" />
+                {/* Add notification badge if there are unread notifications */}
+                <span className="absolute -top-1 -right-1 bg-yellow-500 text-black text-xs rounded-full h-5 w-5 flex items-center justify-center font-bold">
+                  3
+                </span>
               </Button>
               
               {/* Logout Button */}
@@ -2310,33 +2322,7 @@ export default function GymOwnerDashboard() {
               <div className="space-y-6">
 
           <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-            {/* Updated TabsList to hide Plans and Settings tabs */}
-            <TabsList className="grid w-full grid-cols-4 bg-gray-800/50 border border-gray-700 backdrop-blur-sm">
-              <TabsTrigger
-                value="overview"
-                className="text-white data-[state=active]:bg-gradient-to-r data-[state=active]:from-red-600 data-[state=active]:to-red-700 data-[state=active]:text-white hover:bg-gray-700/50"
-              >
-                Overview
-              </TabsTrigger>
-              <TabsTrigger
-                value="members"
-                className="text-white data-[state=active]:bg-gradient-to-r data-[state=active]:from-red-600 data-[state=active]:to-red-700 data-[state=active]:text-white hover:bg-gray-700/50"
-              >
-                Members
-              </TabsTrigger>
-              <TabsTrigger
-                value="revenue"
-                className="text-white data-[state=active]:bg-gradient-to-r data-[state=active]:from-red-600 data-[state=active]:to-red-700 data-[state=active]:text-white hover:bg-gray-700/50"
-              >
-                Revenue
-              </TabsTrigger>
-              <TabsTrigger
-                value="messages"
-                className="text-white data-[state=active]:bg-gradient-to-r data-[state=active]:from-red-600 data-[state=active]:to-red-700 data-[state=active]:text-white hover:bg-gray-700/50"
-              >
-                Messages
-              </TabsTrigger>
-            </TabsList>
+            {/* TabsList removed - navigation now handled by footer */}
 
             {/* Overview Tab */}
             <TabsContent value="overview" className="space-y-6">
@@ -3749,136 +3735,80 @@ onClick={handleWalletRecharge}
         </DialogContent>
       </Dialog>
 
-      {/* Modern Footer Navigation */}
-      <footer className="fixed bottom-0 left-0 right-0 z-50 backdrop-blur-xl bg-gradient-to-r from-[#da1c24]/95 via-[#e63946]/95 to-[#da1c24]/95 border-t border-red-700/30 shadow-2xl">
-        <div className="max-w-4xl mx-auto px-3 py-3">
-          <div className="flex items-center justify-between max-w-md mx-auto">
-            {/* Home Tab */}
+      {/* Enhanced Footer Navigation - Matching Header Design */}
+      <div className="fixed bottom-0 left-0 right-0 backdrop-blur-xl bg-gradient-to-r from-[#da1c24]/95 via-[#e63946]/95 to-[#da1c24]/95 border-t border-red-700/30 shadow-2xl z-50">
+        <div className="max-w-md mx-auto px-4">
+          <div className="flex items-center justify-around py-3">
+            {/* Home */}
             <button
               onClick={() => setActiveTab("overview")}
-              className={`flex flex-col items-center gap-1.5 min-w-0 px-3 py-2 rounded-xl transition-all duration-300 group ${
+              className={`flex flex-col items-center space-y-1 px-3 py-2 rounded-xl transition-all duration-300 hover:scale-105 ${
                 activeTab === "overview" 
-                  ? "bg-white/20 text-white shadow-lg scale-105" 
-                  : "text-white/80 hover:text-white hover:bg-white/10"
+                  ? "bg-white/20 text-white shadow-lg" 
+                  : "text-red-100/80 hover:text-white hover:bg-white/10"
               }`}
             >
-              <div className={`p-1.5 rounded-lg transition-all duration-300 ${
-                activeTab === "overview" 
-                  ? "bg-white/20 shadow-md" 
-                  : "group-hover:bg-white/10"
-              }`}>
-                <Home className="h-5 w-5 flex-shrink-0" />
-              </div>
-              <span className="text-xs font-semibold truncate tracking-wide">Home</span>
-              {activeTab === "overview" && (
-                <div className="w-6 h-0.5 bg-white rounded-full" />
-              )}
+              <Home className="h-5 w-5" />
+              <span className="text-xs font-medium tracking-wide">Home</span>
             </button>
 
-            {/* Members Tab */}
-            <button
-              onClick={() => setActiveTab("members")}
-              className={`flex flex-col items-center gap-1.5 min-w-0 px-3 py-2 rounded-xl transition-all duration-300 group ${
-                activeTab === "members" 
-                  ? "bg-white/20 text-white shadow-lg scale-105" 
-                  : "text-white/80 hover:text-white hover:bg-white/10"
-              }`}
-            >
-              <div className={`p-1.5 rounded-lg transition-all duration-300 ${
-                activeTab === "members" 
-                  ? "bg-white/20 shadow-md" 
-                  : "group-hover:bg-white/10"
-              }`}>
-                <Users2 className="h-5 w-5 flex-shrink-0" />
-              </div>
-              <span className="text-xs font-semibold truncate tracking-wide">Members</span>
-              {activeTab === "members" && (
-                <div className="w-6 h-0.5 bg-white rounded-full" />
-              )}
-            </button>
-
-            {/* Revenue Tab */}
-            <button
-              onClick={() => setActiveTab("revenue")}
-              className={`flex flex-col items-center gap-1.5 min-w-0 px-3 py-2 rounded-xl transition-all duration-300 group ${
-                activeTab === "revenue" 
-                  ? "bg-white/20 text-white shadow-lg scale-105" 
-                  : "text-white/80 hover:text-white hover:bg-white/10"
-              }`}
-            >
-              <div className={`p-1.5 rounded-lg transition-all duration-300 ${
-                activeTab === "revenue" 
-                  ? "bg-white/20 shadow-md" 
-                  : "group-hover:bg-white/10"
-              }`}>
-                <BarChart3 className="h-5 w-5 flex-shrink-0" />
-              </div>
-              <span className="text-xs font-semibold truncate tracking-wide">Revenue</span>
-              {activeTab === "revenue" && (
-                <div className="w-6 h-0.5 bg-white rounded-full" />
-              )}
-            </button>
-
-            {/* Messages Tab */}
-            <button
-              onClick={() => setActiveTab("messages")}
-              className={`flex flex-col items-center gap-1.5 min-w-0 px-3 py-2 rounded-xl transition-all duration-300 group ${
-                activeTab === "messages" 
-                  ? "bg-white/20 text-white shadow-lg scale-105" 
-                  : "text-white/80 hover:text-white hover:bg-white/10"
-              }`}
-            >
-              <div className={`relative p-1.5 rounded-lg transition-all duration-300 ${
-                activeTab === "messages" 
-                  ? "bg-white/20 shadow-md" 
-                  : "group-hover:bg-white/10"
-              }`}>
-                <MessageCircle className="h-5 w-5 flex-shrink-0" />
-                {/* Message notification dot */}
-                <div className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-gradient-to-r from-yellow-400 to-orange-500 rounded-full animate-pulse" />
-              </div>
-              <span className="text-xs font-semibold truncate tracking-wide">Messages</span>
-              {activeTab === "messages" && (
-                <div className="w-6 h-0.5 bg-white rounded-full" />
-              )}
-            </button>
-
-            {/* Settings Tab */}
-            <button
-              onClick={() => setActiveTab("settings")}
-              className={`flex flex-col items-center gap-1.5 min-w-0 px-3 py-2 rounded-xl transition-all duration-300 group ${
-                activeTab === "settings" 
-                  ? "bg-white/20 text-white shadow-lg scale-105" 
-                  : "text-white/80 hover:text-white hover:bg-white/10"
-              }`}
-            >
-              <div className={`p-1.5 rounded-lg transition-all duration-300 ${
-                activeTab === "settings" 
-                  ? "bg-white/20 shadow-md" 
-                  : "group-hover:bg-white/10"
-              }`}>
-                <Settings className="h-5 w-5 flex-shrink-0" />
-              </div>
-              <span className="text-xs font-semibold truncate tracking-wide">Settings</span>
-              {activeTab === "settings" && (
-                <div className="w-6 h-0.5 bg-white rounded-full" />
-              )}
-            </button>
-
-            {/* Plans Tab - Hidden but accessible */}
+            {/* Plans */}
             <button
               onClick={() => setActiveTab("plans")}
-              className="hidden"
+              className={`flex flex-col items-center space-y-1 px-3 py-2 rounded-xl transition-all duration-300 hover:scale-105 ${
+                activeTab === "plans" 
+                  ? "bg-white/20 text-white shadow-lg" 
+                  : "text-red-100/80 hover:text-white hover:bg-white/10"
+              }`}
             >
-              <CreditCard className="h-5 w-5 flex-shrink-0" />
-              <span className="text-xs font-medium truncate">Plans</span>
+              <CreditCard className="h-5 w-5" />
+              <span className="text-xs font-medium tracking-wide">Plans</span>
+            </button>
+
+            {/* Revenue */}
+            <button
+              onClick={() => setActiveTab("revenue")}
+              className={`flex flex-col items-center space-y-1 px-3 py-2 rounded-xl transition-all duration-300 hover:scale-105 ${
+                activeTab === "revenue" 
+                  ? "bg-white/20 text-white shadow-lg" 
+                  : "text-red-100/80 hover:text-white hover:bg-white/10"
+              }`}
+            >
+              <BarChart3 className="h-5 w-5" />
+              <span className="text-xs font-medium tracking-wide">Revenue</span>
+            </button>
+
+            {/* Members */}
+            <button
+              onClick={() => setActiveTab("members")}
+              className={`flex flex-col items-center space-y-1 px-3 py-2 rounded-xl transition-all duration-300 hover:scale-105 ${
+                activeTab === "members" 
+                  ? "bg-white/20 text-white shadow-lg" 
+                  : "text-red-100/80 hover:text-white hover:bg-white/10"
+              }`}
+            >
+              <Users className="h-5 w-5" />
+              <span className="text-xs font-medium tracking-wide">Members</span>
+            </button>
+
+            {/* Settings */}
+            <button
+              onClick={() => setActiveTab("settings")}
+              className={`flex flex-col items-center space-y-1 px-3 py-2 rounded-xl transition-all duration-300 hover:scale-105 ${
+                activeTab === "settings" 
+                  ? "bg-white/20 text-white shadow-lg" 
+                  : "text-red-100/80 hover:text-white hover:bg-white/10"
+              }`}
+            >
+              <Settings className="h-5 w-5" />
+              <span className="text-xs font-medium tracking-wide">Settings</span>
             </button>
           </div>
         </div>
         
-        {/* Subtle gradient overlay */}
+        {/* Subtle gradient overlay matching header */}
         <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent pointer-events-none" />
-      </footer>
+      </div>
 
       <Dialog open={coinModalOpen} onOpenChange={setCoinModalOpen}>
         <DialogContent className="bg-gray-800 border-gray-700 max-w-md">
