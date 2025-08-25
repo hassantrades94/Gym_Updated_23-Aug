@@ -486,7 +486,7 @@ export default function CheckInPage() {
                   <span className={`font-medium ${
                     validationStatus.withinRadius ? 'text-green-300' : 'text-red-300'
                   }`}>
-                    Within 15m radius
+                    Within 25m radius
                   </span>
                 </div>
                 <div className="flex items-center gap-3">
@@ -539,7 +539,7 @@ export default function CheckInPage() {
             <div className="mt-4 text-center">
               {!validationStatus.withinRadius && (
                 <p className="text-sm text-gray-400">
-                  Move within 15 meters of the gym to enable check-in
+                  Move within 25 meters of the gym to enable check-in
                 </p>
               )}
               {validationStatus.withinRadius && !validationStatus.hasRequiredPresence && (

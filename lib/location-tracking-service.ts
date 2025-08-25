@@ -25,6 +25,9 @@ interface TrackingState {
   };
 }
 
+// Import the persistent timer service
+import { persistentTimerService } from './persistent-timer-service';
+
 class LocationTrackingService {
   private trackingState: TrackingState = {
     isWithinRadius: false,
@@ -60,7 +63,7 @@ class LocationTrackingService {
   }) => void;
   private onAutoCheckIn?: () => void;
 
-  private readonly GEOFENCE_RADIUS = 15; // meters
+  private readonly GEOFENCE_RADIUS = 25; // meters - updated from 15 to 25
   private readonly REQUIRED_PRESENCE_TIME = 20 * 60 * 1000; // 20 minutes in milliseconds
   private readonly TRACKING_INTERVAL = 3000; // 3 seconds for more precise tracking
   private readonly VALIDATION_INTERVAL = 1000; // 1 second for real-time validation
@@ -185,18 +188,34 @@ class LocationTrackingService {
 
     // Check if user entered or left the geofence
     if (isWithinRadius && !this.trackingState.isWithinRadius) {
-      // User entered the geofence
+      // User entered the geofence - start timer automatically
       this.trackingState.isWithinRadius = true;
       this.trackingState.entryTime = currentTime;
       this.trackingState.checkInTriggered = false;
+      
+      // Get user data for timer
+      const userData = localStorage.getItem('flexio_user');
+      if (userData) {
+        const user = JSON.parse(userData);
+        const membershipData = localStorage.getItem('flexio_membership');
+        if (membershipData) {
+          const membership = JSON.parse(membershipData);
+          persistentTimerService.startTimer(user.id, membership.gym_id);
+        }
+      }
+      
       console.log('User entered geofence at:', new Date(currentTime));
     } else if (!isWithinRadius && this.trackingState.isWithinRadius) {
-      // User left the geofence - reset tracking but keep history
-      console.log('User left geofence at:', new Date(currentTime));
+      // User left the geofence - stop timer
       this.trackingState.isWithinRadius = false;
       this.trackingState.entryTime = null;
       this.trackingState.continuousPresenceTime = 0;
       this.trackingState.checkInTriggered = false;
+      
+      // Stop the timer when user exits geofence
+      persistentTimerService.stopTimer();
+      
+      console.log('User left geofence at:', new Date(currentTime));
     }
 
     // Update continuous presence time
@@ -208,6 +227,20 @@ class LocationTrackingService {
 
     this.trackingState.lastPosition = location;
     this.validateCheckInRequirements();
+
+    // Trigger callback with updated data
+    if (this.onLocationUpdate) {
+      this.onLocationUpdate({
+        distance,
+        isWithinRadius,
+        continuousTime: this.trackingState.continuousPresenceTime,
+        canAutoCheckIn: this.canTriggerAutoCheckIn(),
+        canManualCheckIn: this.canManualCheckIn(),
+        validationStatus: this.trackingState.validationStatus,
+        currentPosition: location,
+        lastPosition: this.trackingState.lastPosition || location,
+      });
+    }
   }
 
   private validateCheckInRequirements() {

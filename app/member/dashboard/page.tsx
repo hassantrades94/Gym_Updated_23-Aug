@@ -34,6 +34,7 @@ import { useToast } from "@/hooks/use-toast"
 import Link from "next/link"
 import { supabase } from "@/lib/supabase"
 import { LeaderboardService, type LeaderboardMember } from '@/lib/leaderboard-service'
+import { persistentTimerService } from '@/lib/persistent-timer-service'
 
 export default function MemberDashboard() {
   const { toast } = useToast()
@@ -46,6 +47,16 @@ export default function MemberDashboard() {
   const [showReferralForm, setShowReferralForm] = useState(false)
   const [showEditProfile, setShowEditProfile] = useState(false)
   const [referralPhone, setReferralPhone] = useState("")
+  
+  // Timer state
+  const [timerState, setTimerState] = useState({
+    isActive: false,
+    elapsedTime: 0,
+    formattedTime: '00:00',
+    remainingTime: 0,
+    formattedRemainingTime: '20:00'
+  })
+
   type MemberData = {
     name: string
     coins: number
@@ -97,6 +108,101 @@ export default function MemberDashboard() {
     if (bmi < 25) return { category: "Normal", color: "text-green-600" }
     if (bmi < 30) return { category: "Overweight", color: "text-yellow-600" }
     return { category: "Obese", color: "text-red-600" }
+  }
+
+  // Timer integration useEffect
+  useEffect(() => {
+    // Set up timer callbacks
+    persistentTimerService.setCallbacks({
+      onTimerUpdate: (elapsedTime, formattedTime) => {
+        setTimerState(prev => ({
+          ...prev,
+          elapsedTime,
+          formattedTime,
+          remainingTime: persistentTimerService.getRemainingTime(),
+          formattedRemainingTime: persistentTimerService.getFormattedRemainingTime()
+        }))
+      },
+      onTimerStart: () => {
+        setTimerState(prev => ({ ...prev, isActive: true }))
+        toast({
+          title: "Check-in Timer Started",
+          description: "You've entered the gym area. Timer started automatically!",
+        })
+      },
+      onTimerStop: () => {
+        setTimerState(prev => ({
+          ...prev,
+          isActive: false,
+          elapsedTime: 0,
+          formattedTime: '00:00',
+          remainingTime: 0,
+          formattedRemainingTime: '20:00'
+        }))
+        toast({
+          title: "Check-in Timer Stopped",
+          description: "You've left the gym area. Timer stopped.",
+        })
+      },
+      onTimerComplete: () => {
+        toast({
+          title: "Check-in Complete!",
+          description: "You've completed your 20-minute gym session.",
+        })
+        // Trigger automatic check-in
+        handleAutoCheckIn()
+      }
+    })
+
+    // Initialize timer state
+    const currentState = persistentTimerService.getTimerState()
+    if (currentState.isActive) {
+      setTimerState({
+        isActive: true,
+        elapsedTime: currentState.elapsedTime,
+        formattedTime: persistentTimerService.getFormattedTime(),
+        remainingTime: persistentTimerService.getRemainingTime(),
+        formattedRemainingTime: persistentTimerService.getFormattedRemainingTime()
+      })
+    }
+
+    return () => {
+      // Cleanup is handled by the service itself
+    }
+  }, [])
+
+  const handleAutoCheckIn = async () => {
+    // Implement automatic check-in logic
+    try {
+      const userData = localStorage.getItem('flexio_user')
+      if (!userData) return
+      
+      const user = JSON.parse(userData)
+      
+      // Call check-in API
+      const response = await fetch('/api/checkin', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userId: user.id,
+          location: location,
+          sessionId: persistentTimerService.getTimerState().sessionId
+        })
+      })
+      
+      if (response.ok) {
+        toast({
+          title: "Check-in Successful!",
+          description: "You've been automatically checked in.",
+        })
+        // Refresh member data
+        fetchUserData()
+      }
+    } catch (error) {
+      console.error('Auto check-in failed:', error)
+    }
   }
 
   useEffect(() => {
@@ -631,6 +737,39 @@ export default function MemberDashboard() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black pb-20 text-white">
+      {/* Timer Display - Always visible when active */}
+      {timerState.isActive && (
+        <div className="fixed top-20 right-4 z-50">
+          <Card className="bg-green-900 border-green-700 shadow-lg">
+            <CardContent className="p-4">
+              <div className="flex items-center space-x-3">
+                <div className="relative">
+                  <Clock className="h-6 w-6 text-green-400" />
+                  <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+                </div>
+                <div>
+                  <div className="text-sm font-medium text-green-200">
+                    Check-in Timer
+                  </div>
+                  <div className="text-xl font-bold text-green-400">
+                    {timerState.formattedTime} / 20:00
+                  </div>
+                  <div className="text-xs text-green-300">
+                    Remaining: {timerState.formattedRemainingTime}
+                  </div>
+                  <div className="w-32 bg-green-800 rounded-full h-2 mt-1">
+                    <div 
+                      className="bg-green-500 h-2 rounded-full transition-all duration-1000"
+                      style={{ width: `${(timerState.elapsedTime / (20 * 60 * 1000)) * 100}%` }}
+                    ></div>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+      
       <header className="fixed top-0 left-0 right-0 z-50 bg-[#da1c24] border-b border-red-800">
         <div className="max-w-md mx-auto px-3 py-3">
           <div className="flex items-center justify-between">
