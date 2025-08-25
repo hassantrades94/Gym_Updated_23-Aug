@@ -28,10 +28,12 @@ import {
   Sparkles,
   ChefHat,
   Camera,
+  Dumbbell,
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import Link from "next/link"
 import { supabase } from "@/lib/supabase"
+import { LeaderboardService, type LeaderboardMember } from '@/lib/leaderboard-service'
 
 export default function MemberDashboard() {
   const { toast } = useToast()
@@ -80,7 +82,8 @@ export default function MemberDashboard() {
   const [isLoading, setIsLoading] = useState(true)
 
   // Replace mock data with live state
-  const [leaderboard, setLeaderboard] = useState<{ rank: number; name: string; streak: number; isCurrentUser: boolean }[]>([])
+  const [leaderboard, setLeaderboard] = useState<LeaderboardMember[]>([])
+  const [leaderboardSubscription, setLeaderboardSubscription] = useState<any>(null)
   const [gymLocation, setGymLocation] = useState<{ lat: number; lng: number } | null>(null)
 
   const calculateBMI = () => {
@@ -97,7 +100,7 @@ export default function MemberDashboard() {
   }
 
   useEffect(() => {
-    const checkUserRole = async () => {
+    const fetchUserData = async () => {
       const userData = localStorage.getItem("flexio_user")
       if (!userData) {
         toast({
@@ -213,37 +216,7 @@ export default function MemberDashboard() {
           setTodaysBirthdays(birthdays)
         }
 
-        // Leaderboard (top monthly check-ins in this gym)
-        if (membershipData?.gym_id) {
-          const startOfMonth = new Date(currentYear, currentMonth, 1).toISOString()
-          const startOfNextMonth = new Date(currentYear, currentMonth + 1, 1).toISOString()
-
-          const { data: leaderboardData } = await supabase
-            .from("check_ins")
-            .select("user_id, users!inner(full_name)")
-            .eq("gym_id", membershipData.gym_id)
-            .gte("check_in_time", startOfMonth)
-            .lt("check_in_time", startOfNextMonth)
-
-          const counts: Record<string, { name: string; count: number }> = {}
-          leaderboardData?.forEach((row: any) => {
-            const uid = row.user_id
-            const name = row.users.full_name
-            counts[uid] = counts[uid] ? { name, count: counts[uid].count + 1 } : { name, count: 1 }
-          })
-
-          const sorted = Object.entries(counts)
-            .sort(([, a], [, b]) => b.count - a.count)
-            .slice(0, 5)
-            .map(([uid, d], index) => ({
-              rank: index + 1,
-              name: d.name,
-              streak: d.count, // using monthly visits count here
-              isCurrentUser: uid === user.id,
-            }))
-
-          setLeaderboard(sorted)
-        }
+        // Leaderboard will be handled by separate useEffect
 
         // Wishes already sent today (disable the button)
         const todayString = new Date().toISOString().split("T")[0]
@@ -282,8 +255,52 @@ export default function MemberDashboard() {
       setIsLoading(false)
     }
 
-    checkUserRole()
-  }, [toast])
+    fetchUserData()
+    
+    // Cleanup subscription on unmount
+    return () => {
+      if (leaderboardSubscription) {
+        leaderboardSubscription.unsubscribe()
+      }
+    }
+  }, [])
+
+  // Add real-time leaderboard updates
+  useEffect(() => {
+    const userData = localStorage.getItem("flexio_user")
+    const user = userData ? JSON.parse(userData) : null
+    
+    if (memberData.gymId && user?.id) {
+      // Initial fetch
+      const loadLeaderboard = async () => {
+        const leaderboardData = await LeaderboardService.fetchGymLeaderboard(
+          memberData.gymId!,
+          user.id
+        )
+        setLeaderboard(leaderboardData)
+      }
+      
+      loadLeaderboard()
+
+      // Subscribe to real-time updates
+      const subscription = LeaderboardService.subscribeToLeaderboardUpdates(
+        memberData.gymId!,
+        (updatedLeaderboard) => {
+          setLeaderboard(updatedLeaderboard)
+        },
+        user.id
+      )
+      
+      setLeaderboardSubscription(subscription)
+
+      // Cleanup previous subscription
+      return () => {
+        if (subscription) {
+          subscription.unsubscribe()
+        }
+      }
+    }
+  }, [memberData.gymId])
 
   // Separate useEffect for geolocation to avoid blocking UI
   useEffect(() => {
@@ -298,10 +315,10 @@ export default function MemberDashboard() {
           }
           setLocation(userLoc)
 
-          // Calculate distance to gym
+          // Calculate distance to gym in meters
           const distance = calculateDistance(userLoc.lat, userLoc.lng, gymLocation.lat, gymLocation.lng)
           setDistanceFromGym(distance)
-          setCanCheckIn(distance <= 0.1)
+          setCanCheckIn(distance <= 15) // 15 meters instead of 0.1 km (100 meters)
         },
         (error) => {
           console.error("Geolocation error:", error)
@@ -333,7 +350,7 @@ export default function MemberDashboard() {
   }, [gymLocation])
 
   const calculateDistance = (lat1: number, lng1: number, lat2: number, lng2: number) => {
-    const R = 6371
+    const R = 6371 // Earth's radius in kilometers
     const dLat = ((lat2 - lat1) * Math.PI) / 180
     const dLng = ((lng2 - lng1) * Math.PI) / 180
     const a =
@@ -343,7 +360,7 @@ export default function MemberDashboard() {
         Math.sin(dLng / 2) *
         Math.sin(dLng / 2)
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-    return R * c
+    return R * c * 1000 // Convert to meters instead of kilometers
   }
 
   const getPaymentStatus = () => {
@@ -525,10 +542,11 @@ export default function MemberDashboard() {
   }
 
   const formatDistance = (distance: number) => {
-    if (distance < 1) {
-      return `${Math.round(distance * 1000)}m away`
+    // distance is now in meters
+    if (distance < 1000) {
+      return `${Math.round(distance)}m away`
     }
-    return `${distance.toFixed(1)}km away`
+    return `${(distance / 1000).toFixed(1)}km away`
   }
 
   const [birthdayWishes, setBirthdayWishes] = useState<string[]>([])
@@ -596,7 +614,7 @@ export default function MemberDashboard() {
 
   const bmi = calculateBMI()
   const bmiInfo = bmi ? getBMICategory(Number.parseFloat(bmi)) : null
-  const myRank = leaderboard.find((m) => m.isCurrentUser)?.rank
+  const myRank = LeaderboardService.getCurrentUserRank(leaderboard)
 
   if (isLoading) {
     return (
@@ -616,11 +634,21 @@ export default function MemberDashboard() {
       <header className="fixed top-0 left-0 right-0 z-50 bg-[#da1c24] border-b border-red-800">
         <div className="max-w-md mx-auto px-3 py-3">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center flex-shrink-0">
-                <Zap className="h-5 w-5 text-[#da1c24]" />
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              {/* Updated logo to match owner dashboard style */}
+              <div className="w-10 h-10 bg-gradient-to-br from-red-500 to-red-600 rounded-xl flex items-center justify-center border-2 border-white/90 shadow-lg flex-shrink-0">
+                <Dumbbell className="h-6 w-6 text-white" />
               </div>
-              <span className="font-bold text-white text-lg truncate">Flexio</span>
+              
+              {/* Dynamic Gym Name Section */}
+              <div className="flex flex-col min-w-0">
+                <h1 className="text-xl font-bold text-transparent bg-gradient-to-r from-white via-red-100 to-white bg-clip-text tracking-tight leading-tight truncate">
+                  {memberData.gymName || 'Flexio'}
+                </h1>
+                <span className="text-xs text-red-100/80 font-medium tracking-wide">
+                  Member Dashboard
+                </span>
+              </div>
             </div>
             <Button
               variant="ghost"

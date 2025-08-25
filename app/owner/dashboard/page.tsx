@@ -9,6 +9,13 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Progress } from "@/components/ui/progress"
+import { Switch } from "@/components/ui/switch"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import {
   Dialog,
   DialogContent,
@@ -67,7 +74,7 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Tooltip,
+  Tooltip as RechartsTooltip,
   Legend,
   ResponsiveContainer,
   PieChart,
@@ -190,6 +197,32 @@ export default function GymOwnerDashboard() {
     birthdayNotifications: true,
   })
 
+  // Streak Coin Settings
+  type StreakCoinSettings = {
+    day1: number
+    day2: number
+    day3: number
+    day4: number
+    day5: number
+    day6Plus: number
+    sundayAutoStreak: boolean
+    unifiedMode: boolean
+    unifiedValue: number
+  }
+
+  const [streakCoinSettings, setStreakCoinSettings] = useState<StreakCoinSettings>({
+    day1: 1,
+    day2: 3,
+    day3: 5,
+    day4: 7,
+    day5: 9,
+    day6Plus: 10,
+    sundayAutoStreak: true
+  })
+
+  const [isEditingStreakSettings, setIsEditingStreakSettings] = useState(false)
+  const [tempStreakSettings, setTempStreakSettings] = useState<StreakCoinSettings>(streakCoinSettings)
+
   const toggleNotificationSetting = async (setting: 'paymentReminders' | 'birthdayNotifications') => {
     const newValue = !notificationSettings[setting]
 
@@ -212,6 +245,44 @@ export default function GymOwnerDashboard() {
         variant: "destructive",
       })
     }
+  }
+
+  // Streak Coin Settings Functions
+  const handleStreakSettingsEdit = () => {
+    setTempStreakSettings(streakCoinSettings)
+    setIsEditingStreakSettings(true)
+  }
+
+  const saveStreakSettings = async () => {
+    try {
+      // Here you would typically save to your database
+      // For now, we'll just update the local state
+      setStreakCoinSettings(tempStreakSettings)
+      setIsEditingStreakSettings(false)
+      
+      toast({
+        title: "Settings Updated",
+        description: "Streak coin allocation settings have been saved successfully.",
+      })
+    } catch (error: any) {
+      toast({
+        title: "Failed to save settings",
+        description: error.message || "Please try again",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const cancelStreakSettingsEdit = () => {
+    setTempStreakSettings(streakCoinSettings)
+    setIsEditingStreakSettings(false)
+  }
+
+  const updateTempStreakSetting = (key: keyof StreakCoinSettings, value: number | boolean) => {
+    setTempStreakSettings(prev => ({
+      ...prev,
+      [key]: value
+    }))
   }
 
   // Additional state for live data
@@ -3121,7 +3192,7 @@ export default function GymOwnerDashboard() {
                             fontSize={12}
                             tickFormatter={(value) => `₹${(value / 1000).toFixed(0)}k`}
                           />
-                          <Tooltip 
+                          <RechartsTooltip 
                             contentStyle={{
                               backgroundColor: '#1f2937',
                               border: '1px solid #374151',
@@ -3657,6 +3728,108 @@ export default function GymOwnerDashboard() {
                         {notificationSettings.birthdayNotifications ? 'Enabled' : 'Disabled'}
                       </Button>
                     </div>
+                  </CardContent>
+                </Card>
+
+                {/* Coin Allocation Management */}
+                <Card className="bg-gray-800/50 border border-gray-700 backdrop-blur-sm">
+                  <CardHeader>
+                    <CardTitle className="text-white flex items-center gap-2">
+                      <Coins className="h-5 w-5" />
+                      Coin Allocation Management
+                    </CardTitle>
+                    <CardDescription className="text-gray-300">
+                      Configure coin rewards for member attendance streaks
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    <TooltipProvider>
+                      {/* Sunday Handling */}
+                      <div className="space-y-3">
+                        <Label className="text-white text-base font-medium">Sunday Handling</Label>
+                        <div className="flex items-center justify-between p-3 bg-gray-700/50 rounded-lg">
+                          <div className="flex items-center gap-3">
+                            <Calendar className="h-4 w-4 text-blue-400" />
+                            <div>
+                              <p className="text-white text-sm">Auto-continue streaks on Sundays</p>
+                              <p className="text-gray-400 text-xs">Sundays won't break attendance streaks</p>
+                            </div>
+                          </div>
+                          <Switch
+                            checked={isEditingStreakSettings ? tempStreakSettings.sundayAutoStreak : streakCoinSettings.sundayAutoStreak}
+                            onCheckedChange={(checked) => {
+                              if (isEditingStreakSettings) {
+                                updateTempStreakSetting('sundayAutoStreak', checked)
+                              }
+                            }}
+                            disabled={!isEditingStreakSettings}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Coin Settings */}
+                      <div className="space-y-4">
+                        <Label className="text-white text-base font-medium">Streak Rewards</Label>
+                        
+                        <div className="grid grid-cols-2 gap-4">
+                          {[
+                            { key: 'day1' as keyof StreakCoinSettings, label: 'Day 1', default: 1 },
+                            { key: 'day2' as keyof StreakCoinSettings, label: 'Day 2', default: 3 },
+                            { key: 'day3' as keyof StreakCoinSettings, label: 'Day 3', default: 5 },
+                            { key: 'day4' as keyof StreakCoinSettings, label: 'Day 4', default: 7 },
+                            { key: 'day5' as keyof StreakCoinSettings, label: 'Day 5', default: 9 },
+                            { key: 'day6Plus' as keyof StreakCoinSettings, label: 'Day 6+', default: 10 }
+                          ].map(({ key, label, default: defaultVal }) => (
+                            <div key={key} className="flex items-center gap-3">
+                              <Label className="text-gray-300 min-w-[60px]">{label}:</Label>
+                              <Input
+                                type="number"
+                                min="0"
+                                value={isEditingStreakSettings ? tempStreakSettings[key] as number : streakCoinSettings[key] as number}
+                                onChange={(e) => {
+                                  if (isEditingStreakSettings) {
+                                    updateTempStreakSetting(key, parseInt(e.target.value) || 0)
+                                  }
+                                }}
+                                className="bg-gray-700 border-gray-600 text-white max-w-[80px]"
+                                disabled={!isEditingStreakSettings}
+                              />
+                              <span className="text-gray-400 text-sm">coins</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="flex gap-3 pt-4">
+                        {isEditingStreakSettings ? (
+                          <>
+                            <Button
+                              onClick={saveStreakSettings}
+                              className="bg-green-600 hover:bg-green-700 text-white"
+                            >
+                              <Check className="h-4 w-4 mr-2" />
+                              Save Changes
+                            </Button>
+                            <Button
+                              onClick={cancelStreakSettingsEdit}
+                              variant="outline"
+                              className="border-gray-600 text-white hover:bg-gray-700 bg-transparent"
+                            >
+                              Cancel
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            onClick={handleStreakSettingsEdit}
+                            className="bg-transparent border border-white text-white hover:bg-white hover:text-gray-900"
+                          >
+                            <Edit className="h-4 w-4 mr-2" />
+                            Edit Settings
+                          </Button>
+                        )}
+                      </div>
+                    </TooltipProvider>
                   </CardContent>
                 </Card>
               </div>
