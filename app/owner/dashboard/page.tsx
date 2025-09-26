@@ -62,7 +62,8 @@ import {
   Activity,
   BarChart3,
   Users2,
-  MessageCircle
+  MessageCircle,
+  History
 } from "lucide-react"
 import {
   LineChart,
@@ -137,7 +138,51 @@ export default function GymOwnerDashboard() {
     }
 
     checkUserRole()
+    loadStreakSettings()
   }, [toast, router])
+
+  // Load streak settings from database
+  const loadStreakSettings = async () => {
+    try {
+      const user = await getCurrentUser()
+      if (!user) return
+
+      const { data, error } = await supabase
+        .from('gym_settings')
+        .select('setting_data')
+        .eq('gym_id', user.id)
+        .eq('setting_type', 'streak_rewards')
+        .single()
+
+      if (error && error.code !== 'PGRST116') { // PGRST116 is "not found" error
+        console.warn('Error loading streak settings:', error)
+        return
+      }
+
+      if (data?.setting_data) {
+        const dbSettings = data.setting_data as StreakCoinSettings
+        // Merge with defaults to ensure all properties exist
+        const mergedSettings = {
+          ...{
+            day1: 1,
+            day2: 3,
+            day3: 5,
+            day4: 7,
+            day5: 9,
+            day6Plus: 10,
+            sundayAutoStreak: true,
+            unifiedMode: false,
+            unifiedValue: 5
+          },
+          ...dbSettings
+        }
+        setStreakCoinSettings(mergedSettings)
+        setTempStreakSettings(mergedSettings)
+      }
+    } catch (error) {
+      console.error('Failed to load streak settings:', error)
+    }
+  }
 
   const [selectedFilter, setSelectedFilter] = useState("all")
   const [isEditingCoinValue, setIsEditingCoinValue] = useState(false)
@@ -153,6 +198,8 @@ export default function GymOwnerDashboard() {
   const [isAddingMember, setIsAddingMember] = useState(false)
   const [isAddingMemberLoading, setIsAddingMemberLoading] = useState(false)
   const [editingMember, setEditingMember] = useState<any>(null)
+  const [showMemberConfirmation, setShowMemberConfirmation] = useState(false)
+  const [addedMemberName, setAddedMemberName] = useState("")
   const [bonusCoinsInput, setBonusCoinsInput] = useState<{ [key: number]: string }>({})
   const [activeTab, setActiveTab] = useState("overview")
   const [coinValue, setCoinValue] = useState(4.0)
@@ -169,6 +216,11 @@ export default function GymOwnerDashboard() {
   const [isEditingPayment, setIsEditingPayment] = useState(false)
   const [originalPlanEndDate, setOriginalPlanEndDate] = useState("")
 
+  // SMS reminder state variables
+  const [smsReminderOpen, setSmsReminderOpen] = useState(false)
+  const [selectedMemberForSms, setSelectedMemberForSms] = useState<any>(null)
+  const [isSendingSms, setIsSendingSms] = useState(false)
+
   const [coinModalOpen, setCoinModalOpen] = useState(false)
   const [selectedMemberForCoins, setSelectedMemberForCoins] = useState<any>(null)
   const [coinAmount, setCoinAmount] = useState("")
@@ -181,6 +233,11 @@ export default function GymOwnerDashboard() {
     newPlan: "",
     paymentMode: "",
   })
+
+  // New states for payment confirmation and success dialogs
+  const [paymentConfirmModalOpen, setPaymentConfirmModalOpen] = useState(false)
+  const [paymentSuccessModalOpen, setPaymentSuccessModalOpen] = useState(false)
+  const [successMessage, setSuccessMessage] = useState("")
 
   const [walletModalOpen, setWalletModalOpen] = useState(false)
   const [rechargeAmount, setRechargeAmount] = useState("")
@@ -217,7 +274,9 @@ export default function GymOwnerDashboard() {
     day4: 7,
     day5: 9,
     day6Plus: 10,
-    sundayAutoStreak: true
+    sundayAutoStreak: true,
+    unifiedMode: false,
+    unifiedValue: 5
   })
 
   const [isEditingStreakSettings, setIsEditingStreakSettings] = useState(false)
@@ -255,16 +314,42 @@ export default function GymOwnerDashboard() {
 
   const saveStreakSettings = async () => {
     try {
-      // Here you would typically save to your database
-      // For now, we'll just update the local state
+      const user = await getCurrentUser()
+      if (!user) {
+        throw new Error('User not authenticated')
+      }
+
+      // Validate settings
+      if (tempStreakSettings.unifiedMode && (!tempStreakSettings.unifiedValue || tempStreakSettings.unifiedValue < 1)) {
+        throw new Error('Unified reward value must be at least 1 coin')
+      }
+
+      // Save to database using upsert
+      const { error } = await supabase
+        .from('gym_settings')
+        .upsert({
+          gym_id: user.id, // Assuming gym owner's user ID is the gym ID
+          setting_type: 'streak_rewards',
+          setting_data: tempStreakSettings,
+          updated_at: new Date().toISOString()
+        }, {
+          onConflict: 'gym_id,setting_type'
+        })
+
+      if (error) {
+        throw error
+      }
+
+      // Update local state
       setStreakCoinSettings(tempStreakSettings)
       setIsEditingStreakSettings(false)
       
       toast({
         title: "Settings Updated",
-        description: "Streak coin allocation settings have been saved successfully.",
+        description: `Streak rewards configured successfully in ${tempStreakSettings.unifiedMode ? 'unified' : 'traditional'} mode.`,
       })
     } catch (error: any) {
+      console.error('Error saving streak settings:', error)
       toast({
         title: "Failed to save settings",
         description: error.message || "Please try again",
@@ -299,6 +384,7 @@ export default function GymOwnerDashboard() {
   })
   const [paymentTransactions, setPaymentTransactions] = useState<any[]>([])
   const [isLoadingRevenue, setIsLoadingRevenue] = useState(false)
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false)
 
   // Helper: safe growth calculation
   const safeCalculateGrowth = (current: number, previous: number): number => {
@@ -558,7 +644,29 @@ export default function GymOwnerDashboard() {
   }
 
   // Updated gymData state - removing mock values
-  const [gymData, setGymData] = useState({
+  const [gymData, setGymData] = useState<{
+    totalMembers: number;
+    activeMembers: number;
+    monthlyRevenue: number;
+    revenueGrowth: number;
+    pendingPayments: number;
+    coinValue: number;
+    location: { lat: number; lng: number } | null;
+    ownerName: string;
+    gymName: string;
+    gymCode: string;
+    newMembersThisMonth: number;
+    walletBalance: number;
+    freeMembersUsed: number;
+    totalFreeMembers: number;
+    paidMembers: number;
+    hiddenMembers: number;
+    requiredAmount: number;
+    subscriptionStatus: string;
+    nextBillingDate: string;
+    todaysCheckIns: number;
+    monthlyChargePerMember: number;
+  }>({
     totalMembers: 0,
     activeMembers: 0,
     monthlyRevenue: 0,
@@ -578,8 +686,8 @@ export default function GymOwnerDashboard() {
     requiredAmount: 0, // Add this field
     subscriptionStatus: "",
     nextBillingDate: "",
-    monthlyChargePerMember: 0,
-    todaysCheckIns: 0, // Add this new field
+    todaysCheckIns: 0,
+    monthlyChargePerMember: 0
   })
 
   const [gymPlans, setGymPlans] = useState<GymPlan[]>([])
@@ -596,6 +704,86 @@ export default function GymOwnerDashboard() {
     phone: "",
     plan: "",
   })
+
+  // Refresh wallet balance from transactions
+  const refreshWalletBalance = async () => {
+    if (!gymId) return
+    
+    try {
+      // Calculate net balance from all wallet transactions
+      const { data: transactions, error } = await supabase
+        .from('wallet_transactions')
+        .select('amount_inr, transaction_type')
+        .eq('gym_id', gymId)
+      
+      if (error) throw error
+      
+      const netBalance = (transactions || []).reduce((total, tx) => {
+        const amount = Number(tx.amount_inr || 0)
+        // Recharge transactions add to balance, all other types (deduction, monthly_billing) subtract
+        if (tx.transaction_type === 'recharge') {
+          return total + Math.abs(amount) // Ensure positive for recharges
+        } else {
+          return total - Math.abs(amount) // Ensure negative for deductions/billing
+        }
+      }, 0)
+      
+      // Update gymData with new balance
+      setGymData(prev => ({
+        ...prev,
+        walletBalance: netBalance
+      }))
+      
+      // Also update subscription data if it exists
+      if (subscriptionData) {
+        setSubscriptionData(prev => prev ? ({
+          ...prev,
+          walletBalance: netBalance
+        }) : null)
+      }
+      
+      // Check if we can automatically unhide members with the current balance
+      const currentSubscriptionData = await SubscriptionService.calculateSubscriptionData(gymId)
+      
+      // Calculate how many additional members we could afford to unhide
+      // Only consider members that are currently hidden due to insufficient balance
+      const currentlyVisiblePaidMembers = Math.max(0, currentSubscriptionData.visibleMembers - 5) // Subtract free members
+      const totalPaidMembers = currentSubscriptionData.paidMembers
+      const potentiallyHiddenMembers = totalPaidMembers - currentlyVisiblePaidMembers
+      
+      // Calculate how many we can afford to unhide with current balance
+      const affordableMembersWithCurrentBalance = Math.floor(netBalance / 10)
+      const membersToUnhide = Math.min(potentiallyHiddenMembers, affordableMembersWithCurrentBalance - currentlyVisiblePaidMembers)
+      
+      // Only proceed if we can unhide more members than currently visible
+      if (membersToUnhide > 0) {
+        const deductionResult = await SubscriptionService.deductForUnhiddenMembers(gymId, membersToUnhide)
+        
+        if (deductionResult.success) {
+          // Update the balance after deduction
+          const newBalance = deductionResult.newBalance || (netBalance - (membersToUnhide * 10))
+          
+          setGymData(prev => ({
+            ...prev,
+            walletBalance: newBalance
+          }))
+          
+          if (subscriptionData) {
+            setSubscriptionData(prev => prev ? ({
+              ...prev,
+              walletBalance: newBalance
+            }) : null)
+          }
+        }
+      }
+      
+      // Refresh subscription data and member visibility after any changes
+      await loadSubscriptionData()
+      await loadVisibleMembers()
+    } catch (error) {
+      console.error('Error refreshing wallet balance:', error)
+    }
+  }
 
   // Load subscription data
   const loadSubscriptionData = async () => {
@@ -784,41 +972,51 @@ export default function GymOwnerDashboard() {
           freeMembersUsed: Number(gym.free_member_count || 0),
         }))
 
-        // Wallet info - Fixed to handle no results
+        // Wallet info - Calculate net balance from transactions
         const { data: wallet, error: walletError } = await supabase
           .from("gym_wallets")
-          .select("balance_inr, last_billing_date")
+          .select("last_billing_date")
           .eq("gym_id", gym.id)
           .maybeSingle()
         
+        // Calculate net wallet balance from all transactions
+        const { data: transactions, error: transactionError } = await supabase
+          .from("wallet_transactions")
+          .select("amount_inr, transaction_type")
+          .eq("gym_id", gym.id)
+        
+        let netBalance = 0
+        if (!transactionError && transactions) {
+          netBalance = transactions.reduce((total, tx) => {
+            const amount = Number(tx.amount_inr || 0)
+            // Recharge transactions add to balance, all other types (deduction, monthly_billing) subtract
+            if (tx.transaction_type === 'recharge') {
+              return total + Math.abs(amount) // Ensure positive for recharges
+            } else {
+              return total - Math.abs(amount) // Ensure negative for deductions/billing
+            }
+          }, 0)
+        }
+        
         if (walletError) {
           console.error("Error fetching wallet data:", walletError)
-        } else if (wallet) {
-          // Calculate next billing date (30 days from last billing or today if no last billing)
-          const lastBilling = wallet.last_billing_date ? new Date(wallet.last_billing_date) : new Date()
-          const nextBilling = new Date(lastBilling)
-          nextBilling.setDate(nextBilling.getDate() + 30)
-          
-          setGymData((prev) => ({
-            ...prev,
-            walletBalance: Number(wallet.balance_inr || 0),
-            nextBillingDate: nextBilling.toISOString().split('T')[0],
-          }))
-        } else {
-          // No wallet record exists, create next billing date as 30 days from now
-          const nextBilling = new Date()
-          nextBilling.setDate(nextBilling.getDate() + 30)
-          
-          setGymData((prev) => ({
-            ...prev,
-            nextBillingDate: nextBilling.toISOString().split('T')[0],
-          }))
         }
+        
+        // Calculate next billing date (30 days from last billing or today if no last billing)
+        const lastBilling = wallet?.last_billing_date ? new Date(wallet.last_billing_date) : new Date()
+        const nextBilling = new Date(lastBilling)
+        nextBilling.setDate(nextBilling.getDate() + 30)
+        
+        setGymData((prev) => ({
+          ...prev,
+          walletBalance: netBalance,
+          nextBillingDate: nextBilling.toISOString().split('T')[0],
+        }))
 
         // Active gym plans
         const { data: plans } = await supabase
           .from("gym_plans")
-          .select("id, plan_name, price_inr, duration_months, is_active")
+          .select("id, plan_name, price_inr, duration_months, is_active, features")
           .eq("gym_id", gym.id)
           .eq("is_active", true)
           .order("price_inr", { ascending: true })
@@ -828,7 +1026,7 @@ export default function GymOwnerDashboard() {
             name: p.plan_name,
             price: Number(p.price_inr),
             duration: p.duration_months === 1 ? "monthly" : `${p.duration_months} months`,
-            features: [],
+            features: p.features ? p.features.split(',').map((f: string) => f.trim()).filter((f: string) => f) : ['Gym Equipments'],
             active: p.is_active,
           }))
         )
@@ -1051,6 +1249,54 @@ export default function GymOwnerDashboard() {
       loadSubscriptionData()
       loadVisibleMembers()
       loadTodaysCheckIns()
+    }
+  }, [gymId])
+
+  // Real-time wallet balance and member visibility updates
+  useEffect(() => {
+    if (!gymId) return
+
+    const walletSubscription = supabase
+      .channel('wallet_transactions')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'wallet_transactions',
+          filter: `gym_id=eq.${gymId}`
+        },
+        (payload) => {
+          console.log('Wallet transaction change:', payload)
+          // Refresh wallet balance when transaction changes
+          refreshWalletBalance()
+        }
+      )
+      .subscribe()
+
+    // Real-time member visibility synchronization
+    const memberSubscription = supabase
+      .channel('memberships_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'memberships',
+          filter: `gym_id=eq.${gymId}`
+        },
+        (payload) => {
+          console.log('Membership change:', payload)
+          // Refresh member visibility and subscription data when memberships change
+          loadSubscriptionData()
+          loadVisibleMembers()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      walletSubscription.unsubscribe()
+      memberSubscription.unsubscribe()
     }
   }, [gymId])
 
@@ -1354,6 +1600,7 @@ export default function GymOwnerDashboard() {
             plan_name: newPlan.name,
             price_inr: Number.parseInt(newPlan.price),
             duration_months: durationMonths,
+            features: newPlan.features,
           })
           .eq("id", editingPlan.id)
           .eq("gym_id", gymId)
@@ -1379,6 +1626,7 @@ export default function GymOwnerDashboard() {
             plan_name: newPlan.name,
             price_inr: Number.parseInt(newPlan.price),
             duration_months: durationMonths,
+            features: newPlan.features,
             is_active: true,
           })
           .select()
@@ -1635,38 +1883,15 @@ export default function GymOwnerDashboard() {
       // Refresh data after adding member
       await loadSubscriptionData()
       await loadVisibleMembers()
-      
-      // Update UI state
-      setMembers((prev) => [
-        ...prev,
-        {
-          id: newUserId,
-          membershipId: membership?.id,
-          name: newMember.name,
-          email: "",
-          phone: newMember.phone,
-          plan: newMember.plan,
-          status: "active",
-          lastVisit: "",
-          joinDate: startDate.toISOString().split("T")[0],
-          planEndDate: expiryDateStr,
-          paymentStatus: "paid", // Set as paid since we created payment record
-          totalVisits: 0,
-          weeklyVisits: 0,
-          currentStreak: 0,
-          totalCoins: 0,
-          avatar: "/placeholder.svg?height=40&width=40",
-          profilePicture: null,
-        },
-      ])
 
+      // Store the member name for the confirmation dialog
+      setAddedMemberName(newMember.name)
+      
       setNewMember({ name: "", phone: "", plan: "" })
       setIsAddingMember(false)
-
-      toast({
-        title: "Member added successfully! 🎉",
-        description: `Account created for ${newMember.name} with ${selectedPlan.name} plan. Default password: 123456.`,
-      })
+      
+      // Show confirmation dialog
+      setShowMemberConfirmation(true)
     } catch (err: any) {
       console.error("Full addMember error:", err)
       toast({ 
@@ -1855,6 +2080,23 @@ export default function GymOwnerDashboard() {
   const updatePaymentDetails = async () => {
     if (!selectedMemberForPayment) return
 
+    // Validate required fields
+    if (!paymentData.status || !paymentData.planEndDate || !paymentData.newPlan || !paymentData.paymentMode) {
+      toast({
+        title: "Missing Information",
+        description: "Please fill in all required fields.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Show confirmation dialog instead of processing immediately
+    setPaymentConfirmModalOpen(true)
+  }
+
+  const processPaymentUpdate = async () => {
+    if (!selectedMemberForPayment) return
+
     const oldPlan = selectedMemberForPayment.plan
     const oldEndDate = selectedMemberForPayment.planEndDate
     const selectedPlan = gymPlans.find((p) => p.name === paymentData.newPlan)
@@ -1947,16 +2189,30 @@ export default function GymOwnerDashboard() {
         notificationMessage = `Your payment status has been updated to ${paymentData.status}. Payment mode: ${paymentData.paymentMode}.`
       }
 
+      // Close confirmation dialog and show success dialog
+      setPaymentConfirmModalOpen(false)
+      setPaymentModalOpen(false)
+      
+      // Set success message and show success dialog
+      const formattedDate = new Date(newEndDate).toLocaleDateString()
+      setSuccessMessage(`${selectedMemberForPayment.name}'s plan has been extended to ${formattedDate}`)
+      setPaymentSuccessModalOpen(true)
+      
+      // Keep the original toast for internal notification
       toast({
         title: "Payment details updated!",
         description: `${selectedMemberForPayment.name} will be notified: "${notificationMessage}"`,
       })
-
-      setPaymentModalOpen(false)
-      setSelectedMemberForPayment(null)
     } catch (e: any) {
+      setPaymentConfirmModalOpen(false)
       toast({ title: "Failed to update payment details", description: e.message || "", variant: "destructive" })
     }
+  }
+
+  const handleSuccessDialogClose = () => {
+    setPaymentSuccessModalOpen(false)
+    setSelectedMemberForPayment(null)
+    setSuccessMessage("")
   }
 
   const openCoinsModal = (member: any) => {
@@ -1997,9 +2253,6 @@ export default function GymOwnerDashboard() {
         supabase.from('coin_transactions').delete().eq('user_id', memberToDelete.id).eq('gym_id', gymId)
       ])
       
-      // Update UI state
-      setMembers(prev => prev.filter(member => member.id !== memberToDelete.id))
-      
       // Refresh data
       await loadSubscriptionData()
       await loadVisibleMembers()
@@ -2007,8 +2260,8 @@ export default function GymOwnerDashboard() {
       // Update gymData with new member count
       setGymData(prev => ({
         ...prev,
-        totalMembers: prev.totalMembers + 1,
-        activeMembers: prev.activeMembers + 1
+        totalMembers: prev.totalMembers - 1,
+        activeMembers: prev.activeMembers - 1
       }))
       
       toast({
@@ -2034,6 +2287,126 @@ export default function GymOwnerDashboard() {
     setMemberDeleteConfirmOpen(false)
     setMemberSecondConfirmOpen(false)
     setMemberToDelete(null)
+  }
+
+  // SMS reminder functions
+  const openSmsReminderDialog = (member: any) => {
+    setSelectedMemberForSms(member)
+    setSmsReminderOpen(true)
+  }
+
+  const sendSmsReminder = async () => {
+    // Comprehensive validation for incomplete member data
+    if (!selectedMemberForSms) {
+      toast({
+        title: "Error",
+        description: "No member selected for SMS reminder.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Check for required member data
+    const missingFields = []
+    if (!selectedMemberForSms.name || selectedMemberForSms.name.trim() === '') {
+      missingFields.push('Member name')
+    }
+    if (!selectedMemberForSms.phone || selectedMemberForSms.phone.trim() === '') {
+      missingFields.push('Phone number')
+    }
+    if (!selectedMemberForSms.plan || selectedMemberForSms.plan.trim() === '') {
+      missingFields.push('Membership plan')
+    }
+    if (!gymData.gymName || gymData.gymName.trim() === '') {
+      missingFields.push('Gym name')
+    }
+
+    if (missingFields.length > 0) {
+      toast({
+        title: "Incomplete Member Data",
+        description: `Missing required information: ${missingFields.join(', ')}. Please update the member's profile before sending SMS.`,
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Validate phone number format
+    const phoneNumber = selectedMemberForSms.phone.replace(/[^0-9]/g, '')
+    if (phoneNumber.length < 10) {
+      toast({
+        title: "Invalid Phone Number",
+        description: "The member's phone number appears to be invalid. Please update their contact information.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setIsSendingSms(true)
+
+    try {
+      // Get member's plan details
+      const memberPlan = gymPlans.find(plan => plan.name === selectedMemberForSms.plan)
+      const paymentAmount = memberPlan ? `₹${memberPlan.price}` : 'your membership fee'
+
+      // Validate that we have plan information
+      if (!memberPlan && selectedMemberForSms.plan !== 'Custom') {
+        toast({
+          title: "Plan Information Missing",
+          description: `Could not find pricing information for ${selectedMemberForSms.plan} plan. Please check the member's plan details.`,
+          variant: "destructive",
+        })
+        return
+      }
+
+      // Create pre-formatted SMS message
+      const smsMessage = `Hi ${selectedMemberForSms.name},\n\nThis is a gentle reminder from ${gymData.gymName} about your ${selectedMemberForSms.plan} membership. Your payment of ${paymentAmount} is due.\n\nPlease complete it at your earliest convenience to keep enjoying all our facilities. If you've already made the payment, kindly ignore this message.\n\nThank you for being part of our fitness family!\n\n— ${gymData.gymName}`
+
+      // Create SMS URL with phone number and message
+      const smsUrl = `sms:${phoneNumber}?body=${encodeURIComponent(smsMessage)}`
+
+      // Check if SMS URL is too long (some devices have limits)
+      if (smsUrl.length > 2000) {
+        toast({
+          title: "Message Too Long",
+          description: "The SMS message is too long for some devices. Please consider shortening the gym name or member details.",
+          variant: "destructive",
+        })
+        return
+      }
+
+      // Open SMS app
+      window.open(smsUrl, '_self')
+
+      toast({
+        title: "SMS Ready",
+        description: `SMS reminder prepared for ${selectedMemberForSms.name}. Complete sending from your SMS app.`,
+      })
+
+    } catch (error: any) {
+      console.error('Error preparing SMS:', error)
+      let errorMessage = "Please try again."
+      
+      if (error.message?.includes('phone')) {
+        errorMessage = "There was an issue with the phone number. Please check the member's contact information."
+      } else if (error.message?.includes('message')) {
+        errorMessage = "There was an issue formatting the SMS message. Please try again."
+      }
+      
+      toast({
+        title: "Failed to Prepare SMS",
+        description: errorMessage,
+        variant: "destructive",
+      })
+    } finally {
+      setIsSendingSms(false)
+      setSmsReminderOpen(false)
+      setSelectedMemberForSms(null)
+    }
+  }
+
+  const cancelSmsReminder = () => {
+    setSmsReminderOpen(false)
+    setSelectedMemberForSms(null)
   }
   
   // Payment dialog edit functions
@@ -2090,11 +2463,26 @@ export default function GymOwnerDashboard() {
     }
   }
 
+  // Load Razorpay script dynamically
+  const loadRazorpay = (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      if (typeof window !== "undefined" && (window as any).Razorpay) {
+        resolve(true)
+        return
+      }
+      const script = document.createElement("script")
+      script.src = "https://checkout.razorpay.com/v1/checkout.js"
+      script.onload = () => resolve(true)
+      script.onerror = () => resolve(false)
+      document.body.appendChild(script)
+    })
+  }
+
   const handleWalletRecharge = async () => {
-    if (!rechargeAmount || Number.parseInt(rechargeAmount) < 10) {
+    if (!rechargeAmount || Number.parseInt(rechargeAmount) < 30) {
       toast({
         title: "Invalid amount",
-        description: "Minimum recharge amount is ₹10",
+        description: "Minimum recharge amount is ₹30",
         variant: "destructive",
       })
       return
@@ -2109,40 +2497,179 @@ export default function GymOwnerDashboard() {
       return
     }
 
+    setIsProcessingPayment(true)
+
     try {
-      const response = await fetch("/api/subscription/recharge", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          gymId: gymId,
-          amount: Number.parseInt(rechargeAmount),
-          paymentId: `manual_recharge_${Date.now()}`, // In production, this would come from payment gateway
-        }),
+      // Load Razorpay script first
+      const razorpayLoaded = await loadRazorpay()
+      if (!razorpayLoaded) {
+        throw new Error("Failed to load Razorpay. Please check your internet connection and try again.")
+      }
+
+      // Create order with retry mechanism
+      let response
+      let retryCount = 0
+      const maxRetries = 3
+
+      while (retryCount < maxRetries) {
+        try {
+          response = await fetch("/api/create-order", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              amount: Number.parseInt(rechargeAmount) * 100, // paise
+              currency: "INR",
+              receipt: `wallet_recharge_${Date.now()}`,
+              notes: { type: "wallet_recharge", gym_id: gymId },
+            }),
+          })
+          break
+        } catch (networkError) {
+          retryCount++
+          if (retryCount === maxRetries) {
+            throw new Error("Network error. Please check your connection and try again.")
+          }
+          // Wait before retry
+          await new Promise(resolve => setTimeout(resolve, 1000 * retryCount))
+        }
+      }
+
+      if (!response) {
+        throw new Error("Failed to create payment order after multiple attempts.")
+      }
+
+      let order: any
+      try {
+        const contentType = response.headers.get("content-type") || ""
+        if (!response.ok) {
+          const errorText = await response.text()
+          throw new Error(`Payment server error (${response.status}): ${errorText}`)
+        }
+        if (!contentType.includes("application/json")) {
+          throw new Error("Server returned invalid response format")
+        }
+        order = await response.json()
+      } catch (parseError: any) {
+        console.error("JSON parsing error:", parseError)
+        throw new Error("Invalid response from payment server. Please try again.")
+      }
+
+      if (!order.razorpayOptions) {
+        throw new Error("Invalid order data received from server")
+      }
+
+      const options = {
+        ...order.razorpayOptions,
+        handler: async (resp: any) => {
+          const amountInt = Number.parseInt(rechargeAmount)
+          const previousBalance = gymData.walletBalance || 0
+          const optimisticBalance = previousBalance + amountInt
+          
+          // Optimistic UI update
+          setGymData((prev) => ({ ...prev, walletBalance: optimisticBalance }))
+          
+          try {
+            // Use subscription service for proper transaction handling with validation
+            const result = await SubscriptionService.rechargeWallet(
+              gymId,
+              amountInt,
+              resp?.razorpay_payment_id
+            )
+            
+            if (!result.success) {
+              throw new Error(result.message)
+            }
+            
+            // Check if we can unhide any members with the new balance
+            const updatedSubscriptionData = await SubscriptionService.calculateSubscriptionData(gymId)
+            const newBalance = result.newBalance || optimisticBalance
+            
+            // Calculate how many additional members we could afford to unhide
+            const currentlyVisiblePaidMembers = Math.max(0, updatedSubscriptionData.visibleMembers - 5) // Subtract free members
+            const totalPaidMembers = updatedSubscriptionData.paidMembers
+            const potentiallyHiddenMembers = totalPaidMembers - currentlyVisiblePaidMembers
+            
+            // Calculate how many we can afford to unhide with new balance
+            const affordableMembersWithNewBalance = Math.floor(newBalance / 10)
+            const membersToUnhide = Math.min(potentiallyHiddenMembers, affordableMembersWithNewBalance - currentlyVisiblePaidMembers)
+            
+            let finalBalance = newBalance
+            let deductionMessage = ""
+            
+            // Only proceed if we can unhide more members than currently visible
+            if (membersToUnhide > 0) {
+              const deductionResult = await SubscriptionService.deductForUnhiddenMembers(gymId, membersToUnhide)
+              
+              if (deductionResult.success) {
+                finalBalance = deductionResult.newBalance || finalBalance
+                deductionMessage = ` ${membersToUnhide} member${membersToUnhide > 1 ? 's' : ''} automatically unhidden (₹${membersToUnhide * 10} deducted).`
+              }
+            }
+            
+            // Reload subscription data to ensure consistency
+            await loadSubscriptionData()
+            await loadVisibleMembers()
+
+            toast({
+              title: "Recharge Successful! 🎉",
+              description: `₹${rechargeAmount} has been added to your wallet. New balance: ₹${finalBalance}.${deductionMessage}`,
+            })
+            
+            setWalletModalOpen(false)
+            setRechargeAmount("")
+            setIsProcessingPayment(false)
+          } catch (err: any) {
+            // Rollback optimistic update on failure
+            setGymData((prev) => ({ ...prev, walletBalance: previousBalance }))
+            
+            console.error("Payment processing error:", err)
+            toast({
+              title: "Payment Processing Error",
+              description: err.message || "Payment was captured but there was an issue updating your wallet. Please refresh the page or contact support.",
+              variant: "destructive",
+            })
+            setIsProcessingPayment(false)
+          }
+        },
+        prefill: {
+           name: gymData.ownerName || "Gym Owner",
+         },
+        modal: {
+          ondismiss: () => {
+            toast({
+              title: "Payment Cancelled",
+              description: "You closed the payment window. No charges were made.",
+            })
+            setIsProcessingPayment(false)
+          },
+        },
+        theme: {
+          color: "#da1c24",
+        },
+      }
+
+      const rzp = new (window as any).Razorpay(options)
+      
+      // Handle payment failures
+      rzp.on("payment.failed", (response: any) => {
+        console.error("Payment failed:", response.error)
+        toast({
+          title: "Payment Failed",
+          description: response.error?.description || "Your payment could not be processed. Please try again.",
+          variant: "destructive",
+        })
+        setIsProcessingPayment(false)
       })
 
-      const result = await response.json()
-      
-      if (result.success) {
-        toast({
-          title: "Wallet Recharged!",
-          description: result.message,
-        })
-        
-        // Reload subscription data to reflect new balance
-        await loadSubscriptionData()
-        await loadVisibleMembers()
-        
-        setWalletModalOpen(false)
-        setRechargeAmount("")
-      } else {
-        throw new Error(result.message)
-      }
+      rzp.open()
     } catch (error: any) {
+      console.error("Error creating order:", error)
       toast({
-        title: "Recharge Failed",
-        description: error.message || "Failed to recharge wallet",
+        title: "Payment Failed",
+        description: error.message || "Unable to process payment. Please try again.",
         variant: "destructive",
       })
+      setIsProcessingPayment(false)
     }
   }
 
@@ -2231,17 +2758,13 @@ export default function GymOwnerDashboard() {
             })
             if (txErr) throw txErr
 
-            const newBalance = (gymData.walletBalance || 0) + amountInt
-            const { error: wErr } = await supabase
-              .from("gym_wallets")
-              .upsert({ gym_id: gymId, balance_inr: newBalance }, { onConflict: "gym_id" })
-            if (wErr) throw wErr
+            // Refresh wallet balance from transactions after recording the recharge
+            await refreshWalletBalance()
 
             toast({
               title: "Recharge Successful! 🎉",
               description: `₹${rechargeAmount} added to your wallet`,
             })
-            setGymData((prev) => ({ ...prev, walletBalance: newBalance }))
             setWalletModalOpen(false)
             setRechargeAmount("")
           } catch (err: any) {
@@ -2273,45 +2796,23 @@ export default function GymOwnerDashboard() {
     if (!gymId) return
     
     try {
-      const paidMembers = Math.max(0, gymData.totalMembers - 5)
-      const billingAmount = paidMembers * 10
+      // Use SubscriptionService for consistent billing logic
+      const result = await SubscriptionService.processMonthlyBilling(gymId)
       
-      if (billingAmount > 0 && gymData.walletBalance >= billingAmount) {
-        // Deduct from wallet
-        const { error: walletError } = await supabase
-          .from("gym_wallets")
-          .update({ 
-            balance_inr: gymData.walletBalance - billingAmount,
-            last_billing_date: new Date().toISOString().split("T")[0]
-          })
-          .eq("gym_id", gymId)
-        
-        if (walletError) throw walletError
-        
-        // Record transaction
-        const { error: transactionError } = await supabase
-          .from("wallet_transactions")
-          .insert({
-            gym_id: gymId,
-            transaction_type: "monthly_billing",
-            amount_inr: billingAmount,
-            description: `Monthly billing for ${paidMembers} paid members`
-          })
-        
-        if (transactionError) throw transactionError
+      if (result.success) {
+        // Refresh wallet balance and subscription data after billing
+        await refreshWalletBalance()
+        await loadSubscriptionData()
         
         toast({
           title: "Billing Processed",
-          description: `₹${billingAmount} deducted for ${paidMembers} paid members`,
+          description: result.message,
         })
-        
-        // Refresh data
-        window.location.reload()
-      } else if (billingAmount > gymData.walletBalance) {
+      } else {
         toast({
-          title: "Insufficient Balance",
-          description: "Please recharge your wallet to continue service",
-          variant: "destructive"
+          title: "Billing Failed",
+          description: result.message,
+          variant: "destructive",
         })
       }
     } catch (error) {
@@ -2613,7 +3114,13 @@ export default function GymOwnerDashboard() {
                           <Input
                             id="memberName"
                             value={newMember.name}
-                            onChange={(e) => setNewMember((prev) => ({ ...prev, name: e.target.value }))}
+                            onChange={(e) => {
+                              const capitalizedName = e.target.value
+                                .split(' ')
+                                .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+                                .join(' ')
+                              setNewMember((prev) => ({ ...prev, name: capitalizedName }))
+                            }}
                             placeholder="Enter member's full name"
                             className="bg-gray-700 border-gray-600 text-white"
                           />
@@ -2690,6 +3197,29 @@ export default function GymOwnerDashboard() {
                       </div>
                     </DialogContent>
                   </Dialog>
+                  
+                  {/* Member Added Confirmation Dialog */}
+                  <Dialog open={showMemberConfirmation} onOpenChange={setShowMemberConfirmation}>
+                    <DialogContent className="bg-gray-800 border-gray-700">
+                      <DialogHeader>
+                        <DialogTitle className="text-white flex items-center gap-2">
+                          <CheckCircle className="h-5 w-5 text-green-400" />
+                          Member Added Successfully!
+                        </DialogTitle>
+                        <DialogDescription className="text-gray-400">
+                          {addedMemberName} has been successfully added to your members list.
+                        </DialogDescription>
+                      </DialogHeader>
+                      <div className="flex justify-end">
+                        <Button
+                          onClick={() => setShowMemberConfirmation(false)}
+                          className="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white border-0"
+                        >
+                          OK
+                        </Button>
+                      </div>
+                    </DialogContent>
+                  </Dialog>
                 </div>
               </div>
 
@@ -2763,6 +3293,14 @@ export default function GymOwnerDashboard() {
                               >
                                 <CreditCard className="h-3 w-3 mr-1 flex-shrink-0" />
                                 <span className="truncate">Manage</span>
+                              </Button>
+                              <Button
+                                onClick={() => openSmsReminderDialog(member)}
+                                size="sm"
+                                className="bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white border-0 px-3 py-2 text-xs flex-1"
+                              >
+                                <MessageSquare className="h-3 w-3 mr-1 flex-shrink-0" />
+                                <span className="truncate">SMS</span>
                               </Button>
                               <Button
                                 onClick={() => openCoinModal(member)}
@@ -3039,6 +3577,72 @@ export default function GymOwnerDashboard() {
                     className="flex-1 bg-transparent border-gray-600 text-gray-300 hover:bg-gray-700 hover:text-white"
                   >
                     Cancel
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+
+            {/* Payment Confirmation Dialog */}
+            <Dialog open={paymentConfirmModalOpen} onOpenChange={setPaymentConfirmModalOpen}>
+              <DialogContent className="bg-gray-800 border-gray-700 max-w-md">
+                <DialogHeader>
+                  <DialogTitle className="text-white flex items-center gap-2">
+                    <AlertTriangle className="h-5 w-5 text-yellow-500" />
+                    Confirm Payment Update
+                  </DialogTitle>
+                  <DialogDescription className="text-gray-400">
+                    Are you sure you want to update the payment details for {selectedMemberForPayment?.name}?
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-4 py-4">
+                  <div className="bg-gray-700 p-4 rounded-lg space-y-2">
+                    <p className="text-white text-sm"><strong>Member:</strong> {selectedMemberForPayment?.name}</p>
+                    <p className="text-white text-sm"><strong>Plan:</strong> {paymentData.newPlan}</p>
+                    <p className="text-white text-sm"><strong>Payment Mode:</strong> {paymentData.paymentMode}</p>
+                    <p className="text-white text-sm"><strong>Status:</strong> {paymentData.status}</p>
+                    <p className="text-white text-sm"><strong>Plan End Date:</strong> {paymentData.planEndDate ? new Date(paymentData.planEndDate).toLocaleDateString() : 'N/A'}</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <Button
+                    onClick={processPaymentUpdate}
+                    className="flex-1 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white border-0"
+                  >
+                    Confirm Update
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setPaymentConfirmModalOpen(false)}
+                    className="flex-1 bg-transparent border-gray-600 text-gray-300 hover:bg-gray-700 hover:text-white"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+
+            {/* Payment Success Dialog */}
+            <Dialog open={paymentSuccessModalOpen} onOpenChange={handleSuccessDialogClose}>
+              <DialogContent className="bg-gray-800 border-gray-700 max-w-md">
+                <DialogHeader>
+                  <DialogTitle className="text-white flex items-center gap-2">
+                    <CheckCircle className="h-5 w-5 text-green-500" />
+                    Payment Updated Successfully
+                  </DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-4">
+                  <div className="bg-green-600/20 p-4 rounded-lg border border-green-600/30">
+                    <p className="text-white text-center font-medium">
+                      {successMessage}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex justify-center">
+                  <Button
+                    onClick={handleSuccessDialogClose}
+                    className="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white border-0 px-8"
+                  >
+                    OK
                   </Button>
                 </div>
               </DialogContent>
@@ -3663,7 +4267,7 @@ export default function GymOwnerDashboard() {
                       <Label className="text-white">Current Location</Label>
                       {gymData.location ? (
                         <p className="text-gray-300">
-                          Lat: {gymData.location.lat.toFixed(6)}, Lng: {gymData.location.lng.toFixed(6)}
+                          Lat: {gymData.location?.lat.toFixed(6)}, Lng: {gymData.location?.lng.toFixed(6)}
                         </p>
                       ) : (
                         <p className="text-gray-300">Location not set</p>
@@ -3689,47 +4293,7 @@ export default function GymOwnerDashboard() {
                   </CardContent>
                 </Card>
 
-                <Card className="bg-gray-800/50 border border-gray-700 backdrop-blur-sm">
-                  <CardHeader>
-                    <CardTitle className="text-white">Notifications</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-white">Payment Reminders</p>
-                        <p className="text-gray-300 text-sm">Send automatic payment reminders to members</p>
-                      </div>
-                      <Button
-                        onClick={() => toggleNotificationSetting('paymentReminders')}
-                        variant="outline"
-                        className={`border-gray-600 hover:bg-gray-700 bg-transparent ${
-                          notificationSettings.paymentReminders
-                            ? 'text-green-400 border-green-400'
-                            : 'text-gray-400 border-gray-600'
-                        }`}
-                      >
-                        {notificationSettings.paymentReminders ? 'Enabled' : 'Disabled'}
-                      </Button>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-white">Birthday Notifications</p>
-                        <p className="text-gray-300 text-sm">Get notified about member birthdays</p>
-                      </div>
-                      <Button
-                        onClick={() => toggleNotificationSetting('birthdayNotifications')}
-                        variant="outline"
-                        className={`border-gray-600 hover:bg-gray-700 bg-transparent ${
-                          notificationSettings.birthdayNotifications
-                            ? 'text-green-400 border-green-400'
-                            : 'text-gray-400 border-gray-600'
-                        }`}
-                      >
-                        {notificationSettings.birthdayNotifications ? 'Enabled' : 'Disabled'}
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
+
 
                 {/* Coin Allocation Management */}
                 <Card className="bg-gray-800/50 border border-gray-700 backdrop-blur-sm">
@@ -3767,37 +4331,69 @@ export default function GymOwnerDashboard() {
                         </div>
                       </div>
 
+
+
                       {/* Coin Settings */}
                       <div className="space-y-4">
-                        <Label className="text-white text-base font-medium">Streak Rewards</Label>
+                        <Label className="text-white text-base font-medium">
+                          {(isEditingStreakSettings ? (tempStreakSettings as any).unifiedMode : (streakCoinSettings as any).unifiedMode) 
+                            ? 'Daily Reward Amount' 
+                            : 'Streak Rewards'
+                          }
+                        </Label>
                         
-                        <div className="grid grid-cols-2 gap-4">
-                          {[
-                            { key: 'day1' as keyof StreakCoinSettings, label: 'Day 1', default: 1 },
-                            { key: 'day2' as keyof StreakCoinSettings, label: 'Day 2', default: 3 },
-                            { key: 'day3' as keyof StreakCoinSettings, label: 'Day 3', default: 5 },
-                            { key: 'day4' as keyof StreakCoinSettings, label: 'Day 4', default: 7 },
-                            { key: 'day5' as keyof StreakCoinSettings, label: 'Day 5', default: 9 },
-                            { key: 'day6Plus' as keyof StreakCoinSettings, label: 'Day 6+', default: 10 }
-                          ].map(({ key, label, default: defaultVal }) => (
-                            <div key={key} className="flex items-center gap-3">
-                              <Label className="text-gray-300 min-w-[60px]">{label}:</Label>
-                              <Input
-                                type="number"
-                                min="0"
-                                value={isEditingStreakSettings ? tempStreakSettings[key] as number : streakCoinSettings[key] as number}
-                                onChange={(e) => {
-                                  if (isEditingStreakSettings) {
-                                    updateTempStreakSetting(key, parseInt(e.target.value) || 0)
-                                  }
-                                }}
-                                className="bg-gray-700 border-gray-600 text-white max-w-[80px]"
-                                disabled={!isEditingStreakSettings}
-                              />
-                              <span className="text-gray-400 text-sm">coins</span>
+                        {(isEditingStreakSettings ? (tempStreakSettings as any).unifiedMode : (streakCoinSettings as any).unifiedMode) ? (
+                          // Unified Mode - Single Input
+                          <div className="flex items-center gap-3 p-3 bg-gray-700/30 rounded-lg">
+                            <Label className="text-gray-300 min-w-[120px]">Base Reward:</Label>
+                            <Input
+                              type="number"
+                              min="1"
+                              value={isEditingStreakSettings ? (tempStreakSettings as any).unifiedValue || 5 : (streakCoinSettings as any).unifiedValue || 5}
+                              onChange={(e) => {
+                                if (isEditingStreakSettings) {
+                                  updateTempStreakSetting('unifiedValue' as any, parseInt(e.target.value) || 5)
+                                }
+                              }}
+                              className="bg-gray-700 border-gray-600 text-white max-w-[100px]"
+                              disabled={!isEditingStreakSettings}
+                            />
+                            <span className="text-gray-400 text-sm">coins per day</span>
+                            <div className="ml-4 text-xs text-gray-400">
+                              <p>• Day 1: Base amount</p>
+                              <p>• Day 2+: Progressive multiplier (up to 3x)</p>
                             </div>
-                          ))}
-                        </div>
+                          </div>
+                        ) : (
+                          // Traditional Mode - Individual Day Settings
+                          <div className="grid grid-cols-2 gap-4">
+                            {[
+                              { key: 'day1' as keyof StreakCoinSettings, label: 'Day 1', default: 1 },
+                              { key: 'day2' as keyof StreakCoinSettings, label: 'Day 2', default: 3 },
+                              { key: 'day3' as keyof StreakCoinSettings, label: 'Day 3', default: 5 },
+                              { key: 'day4' as keyof StreakCoinSettings, label: 'Day 4', default: 7 },
+                              { key: 'day5' as keyof StreakCoinSettings, label: 'Day 5', default: 9 },
+                              { key: 'day6Plus' as keyof StreakCoinSettings, label: 'Day 6+', default: 10 }
+                            ].map(({ key, label, default: defaultVal }) => (
+                              <div key={key} className="flex items-center gap-3">
+                                <Label className="text-gray-300 min-w-[60px]">{label}:</Label>
+                                <Input
+                                  type="number"
+                                  min="0"
+                                  value={isEditingStreakSettings ? tempStreakSettings[key] as number : streakCoinSettings[key] as number}
+                                  onChange={(e) => {
+                                    if (isEditingStreakSettings) {
+                                      updateTempStreakSetting(key, parseInt(e.target.value) || 0)
+                                    }
+                                  }}
+                                  className="bg-gray-700 border-gray-600 text-white max-w-[80px]"
+                                  disabled={!isEditingStreakSettings}
+                                />
+                                <span className="text-gray-400 text-sm">coins</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
                       {/* Action Buttons */}
@@ -3884,6 +4480,21 @@ export default function GymOwnerDashboard() {
               ))}
             </div>
 
+            {/* Transaction History Button */}
+            <div className="border-t border-gray-700 pt-4">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setWalletModalOpen(false)
+                  window.location.href = '/owner/wallet-history'
+                }}
+                className="w-full border-gray-600 hover:bg-gray-700 hover:text-white text-white"
+              >
+                <History className="h-4 w-4 mr-2" />
+                View Transaction History
+              </Button>
+            </div>
+
             <div className="flex gap-2">
               <Button
                 variant="outline"
@@ -3896,12 +4507,21 @@ export default function GymOwnerDashboard() {
                 Cancel
               </Button>
               <Button
-onClick={handleWalletRecharge}
-                disabled={!rechargeAmount || Number.parseInt(rechargeAmount) < 30}
-                className="flex-1 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white border-0"
+                onClick={handleWalletRecharge}
+                disabled={!rechargeAmount || Number.parseInt(rechargeAmount) < 30 || isProcessingPayment}
+                className="flex-1 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white border-0 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <CreditCard className="h-4 w-4 mr-2" />
-                Pay with Razorpay
+                {isProcessingPayment ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Processing Payment...
+                  </>
+                ) : (
+                  <>
+                    <CreditCard className="h-4 w-4 mr-2" />
+                    Pay with Razorpay
+                  </>
+                )}
               </Button>
             </div>
           </div>
@@ -4019,6 +4639,64 @@ onClick={handleWalletRecharge}
                 className="flex-1 bg-green-600 hover:bg-green-700 text-white"
               >
                 Add Coins
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* SMS Reminder Confirmation Dialog */}
+      <Dialog open={smsReminderOpen} onOpenChange={setSmsReminderOpen}>
+        <DialogContent className="bg-gray-800 border-gray-700 max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-white flex items-center gap-2">
+              <MessageSquare className="h-5 w-5 text-purple-500" />
+              Send SMS Reminder
+            </DialogTitle>
+            <DialogDescription className="text-gray-400">
+              Are you sure you want to send a reminder notification to {selectedMemberForSms?.name}?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="bg-gray-700/50 p-4 rounded-lg border border-gray-600">
+              <p className="text-white text-sm font-medium mb-2">SMS Preview:</p>
+              <div className="text-gray-300 text-xs bg-gray-800 p-3 rounded border border-gray-600 max-h-32 overflow-y-auto">
+                <p>Hi {selectedMemberForSms?.name},</p>
+                <br />
+                <p>This is a gentle reminder from {gymData.gymName} about your {selectedMemberForSms?.plan} membership. Your payment of {gymPlans.find(plan => plan.name === selectedMemberForSms?.plan) ? `₹${gymPlans.find(plan => plan.name === selectedMemberForSms?.plan)?.price}` : 'your membership fee'} is due.</p>
+                <br />
+                <p>Please complete it at your earliest convenience to keep enjoying all our facilities. If you've already made the payment, kindly ignore this message.</p>
+                <br />
+                <p>Thank you for being part of our fitness family!</p>
+                <br />
+                <p>— {gymData.gymName}</p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <Button
+                onClick={cancelSmsReminder}
+                variant="outline"
+                className="flex-1 bg-transparent border-gray-600 text-gray-300 hover:bg-gray-700"
+                disabled={isSendingSms}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={sendSmsReminder}
+                className="flex-1 bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white border-0"
+                disabled={isSendingSms}
+              >
+                {isSendingSms ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Preparing...
+                  </>
+                ) : (
+                  <>
+                    <MessageSquare className="h-4 w-4 mr-2" />
+                    Send SMS
+                  </>
+                )}
               </Button>
             </div>
           </div>

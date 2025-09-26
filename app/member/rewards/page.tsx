@@ -303,7 +303,7 @@ export default function RewardsPage() {
             <CardContent>
               <div className="space-y-3">
                 {transactions.map((transaction, index) => (
-                  <div key={index} className="flex items-center justify-between">
+                  <div key={`${transaction.date}-${index}`} className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div
                         className={`p-2 rounded-full ${

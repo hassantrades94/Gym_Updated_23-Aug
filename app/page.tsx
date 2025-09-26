@@ -20,8 +20,8 @@ export default function HomePage() {
           <Link href="/auth/signin">
             <Button
               variant="outline"
-              size="sm"
-              className="border-red-500 text-red-400 hover:bg-red-500 hover:text-white bg-transparent"
+              size="lg"
+              className="border-red-500 text-red-400 hover:bg-red-500 hover:text-white bg-transparent px-6 py-3 text-lg font-semibold"
             >
               Sign In
             </Button>
@@ -50,8 +50,20 @@ export default function HomePage() {
               management.
             </p>
             
-            {/* Register Your Gym Button - Fixed width to match other blocks */}
+            {/* Sign In Button - Added above Register Your Gym */}
             <div className="mt-6">
+              <Link href="/auth/signin" className="block">
+                <Button 
+                  variant="outline"
+                  className="w-full border-red-500 text-red-400 hover:bg-red-500 hover:text-white bg-transparent py-4 text-lg font-semibold rounded-xl shadow-lg mb-4 transition-all duration-200"
+                >
+                  Sign In to Your Account
+                </Button>
+              </Link>
+            </div>
+            
+            {/* Register Your Gym Button - Fixed width to match other blocks */}
+            <div>
               <Link href="/auth/signup?type=owner" className="block">
                 <Button className="w-full bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white py-5 text-xl font-semibold rounded-xl shadow-lg">
                   <Dumbbell className="h-6 w-6 mr-2" />

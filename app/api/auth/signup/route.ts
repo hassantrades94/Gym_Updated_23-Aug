@@ -31,6 +31,7 @@ export async function POST(request: NextRequest) {
       height,
       weight,
       gymName,
+      gymLocation,
     } = await request.json()
 
     const dob = dateOfBirth ? new Date(dateOfBirth).toISOString().split("T")[0] : null
@@ -140,14 +141,22 @@ export async function POST(request: NextRequest) {
 
     if (userType === "gym_owner") {
       // Create gym for gym owner
+      const gymInsertData: any = {
+        owner_id: newUser.id,
+        gym_name: gymName || `${fullName}'s Gym`,
+        gym_code: normalizedGymCode,
+        coin_value: 4.0,
+      }
+
+      // Add location data if provided
+      if (gymLocation && gymLocation.lat && gymLocation.lng) {
+        gymInsertData.location_latitude = gymLocation.lat
+        gymInsertData.location_longitude = gymLocation.lng
+      }
+
       const { data: newGym, error: gymError } = await supabase
         .from("gyms")
-        .insert({
-          owner_id: newUser.id,
-          gym_name: gymName || `${fullName}'s Gym`,
-          gym_code: normalizedGymCode,
-          coin_value: 4.0,
-        })
+        .insert(gymInsertData)
         .select()
         .single()
 

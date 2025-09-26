@@ -23,12 +23,30 @@ export class SubscriptionService {
    */
   static async calculateSubscriptionData(gymId: string): Promise<SubscriptionData> {
     try {
-      // Get wallet info
+      // Get wallet info for billing dates
       const { data: wallet } = await supabase
         .from('gym_wallets')
-        .select('balance_inr, last_billing_date')
+        .select('last_billing_date')
         .eq('gym_id', gymId)
         .maybeSingle()
+
+      // Calculate net balance from all wallet transactions
+      const { data: transactions, error: transactionError } = await supabase
+        .from('wallet_transactions')
+        .select('amount_inr, transaction_type')
+        .eq('gym_id', gymId)
+      
+      if (transactionError) throw transactionError
+      
+      const walletBalance = (transactions || []).reduce((total, tx) => {
+        const amount = Number(tx.amount_inr || 0)
+        // Recharge transactions add to balance, all other types (deduction, monthly_billing) subtract
+        if (tx.transaction_type === 'recharge') {
+          return total + Math.abs(amount) // Ensure positive for recharges
+        } else {
+          return total - Math.abs(amount) // Ensure negative for deductions/billing
+        }
+      }, 0)
 
       // Get total members count
       const { data: memberships } = await supabase
@@ -40,8 +58,6 @@ export class SubscriptionService {
       const totalMembers = memberships?.length || 0
       const freeMembers = Math.min(totalMembers, this.FREE_MEMBER_LIMIT)
       const paidMembers = Math.max(0, totalMembers - this.FREE_MEMBER_LIMIT)
-      
-      const walletBalance = Number(wallet?.balance_inr || 0)
       const maxVisiblePaidMembers = Math.floor(walletBalance / this.MONTHLY_CHARGE_PER_MEMBER)
       const visiblePaidMembers = Math.min(paidMembers, maxVisiblePaidMembers)
       const visibleMembers = freeMembers + visiblePaidMembers
@@ -132,28 +148,29 @@ export class SubscriptionService {
         }
       }
 
-      // Deduct amount from wallet
-      const newBalance = subscriptionData.walletBalance - billingAmount
-      const { error: walletError } = await supabase
-        .from('gym_wallets')
-        .update({ 
-          balance_inr: newBalance,
-          last_billing_date: new Date().toISOString().split('T')[0],
-          updated_at: new Date().toISOString()
-        })
-        .eq('gym_id', gymId)
-
-      if (walletError) throw walletError
-
-      // Record transaction
-      await supabase
+      // Record billing transaction (amount should be positive for deduction)
+      const { error: transactionError } = await supabase
         .from('wallet_transactions')
         .insert({
           gym_id: gymId,
           transaction_type: 'monthly_billing',
-          amount_inr: -billingAmount,
-          description: `Monthly billing for ${subscriptionData.paidMembers} paid members`
+          amount_inr: billingAmount, // Positive amount for deduction
+          description: `Monthly subscription billing: ${subscriptionData.paidMembers} members`,
+          created_at: new Date().toISOString()
         })
+
+      if (transactionError) throw transactionError
+
+      // Update billing date in wallet record
+      const { error: walletError } = await supabase
+        .from('gym_wallets')
+        .upsert({
+          gym_id: gymId,
+          last_billing_date: new Date().toISOString().split('T')[0],
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'gym_id' })
+
+      if (walletError) throw walletError
 
       // Ensure gym status is active
       await supabase
@@ -163,7 +180,7 @@ export class SubscriptionService {
 
       return { 
         success: true, 
-        message: `Successfully billed ₹${billingAmount} for ${subscriptionData.paidMembers} paid members` 
+        message: `Successfully billed Rs ${this.MONTHLY_CHARGE_PER_MEMBER} × ${subscriptionData.paidMembers} = ₹${billingAmount} for ${subscriptionData.paidMembers} paid members` 
       }
     } catch (error) {
       console.error('Error processing monthly billing:', error)
@@ -174,39 +191,66 @@ export class SubscriptionService {
   /**
    * Recharge wallet
    */
-  static async rechargeWallet(gymId: string, amount: number, paymentId?: string): Promise<{ success: boolean; message: string }> {
+  static async rechargeWallet(gymId: string, amountInr: number, razorpayPaymentId?: string): Promise<{ success: boolean; message: string; newBalance?: number }> {
     try {
-      // Get current balance
-      const { data: wallet } = await supabase
-        .from('gym_wallets')
-        .select('balance_inr')
-        .eq('gym_id', gymId)
-        .maybeSingle()
-
-      const currentBalance = Number(wallet?.balance_inr || 0)
-      const newBalance = currentBalance + amount
-
-      // Update wallet balance
-      const { error: walletError } = await supabase
-        .from('gym_wallets')
-        .upsert({
-          gym_id: gymId,
-          balance_inr: newBalance,
-          updated_at: new Date().toISOString()
-        })
-
-      if (walletError) throw walletError
-
-      // Record transaction
-      await supabase
+      // Record transaction first
+      const { error: transactionError } = await supabase
         .from('wallet_transactions')
         .insert({
           gym_id: gymId,
           transaction_type: 'recharge',
-          amount_inr: amount,
-          razorpay_payment_id: paymentId,
-          description: `Wallet recharge of ₹${amount}`
+          amount_inr: amountInr,
+          razorpay_payment_id: razorpayPaymentId,
+          description: 'Wallet recharge via Razorpay'
         })
+
+      if (transactionError) {
+        console.error('Error recording transaction:', transactionError)
+        return { success: false, message: 'Failed to record transaction. Please contact support.' }
+      }
+
+      // Calculate new balance from all transactions
+      const { data: transactions, error: fetchError } = await supabase
+        .from('wallet_transactions')
+        .select('amount_inr, transaction_type')
+        .eq('gym_id', gymId)
+
+      if (fetchError) {
+        console.error('Error fetching transactions:', fetchError)
+        return { success: false, message: 'Failed to calculate new balance' }
+      }
+
+      const newBalance = (transactions || []).reduce((total, tx) => {
+        const amount = Number(tx.amount_inr || 0)
+        // Recharge transactions add to balance, all other types (deduction, monthly_billing) subtract
+        if (tx.transaction_type === 'recharge') {
+          return total + Math.abs(amount) // Ensure positive for recharges
+        } else {
+          return total - Math.abs(amount) // Ensure negative for deductions/billing
+        }
+      }, 0)
+
+      // Update wallet record for billing date tracking (no longer storing balance here)
+      const { error: walletError } = await supabase
+        .from('gym_wallets')
+        .upsert(
+          { gym_id: gymId, updated_at: new Date().toISOString() },
+          { onConflict: 'gym_id' }
+        )
+
+      if (walletError) {
+        console.error('Error updating wallet balance:', walletError)
+        // Rollback transaction if wallet update fails
+        await supabase
+          .from('wallet_transactions')
+          .delete()
+          .eq('gym_id', gymId)
+          .eq('transaction_type', 'recharge')
+          .eq('amount_inr', amountInr)
+          .eq('razorpay_payment_id', razorpayPaymentId)
+        
+        return { success: false, message: 'Payment successful but failed to update wallet. Please refresh the page.' }
+      }
 
       // If gym was suspended, reactivate it if balance is sufficient
       const subscriptionData = await this.calculateSubscriptionData(gymId)
@@ -217,10 +261,65 @@ export class SubscriptionService {
           .eq('id', gymId)
       }
 
-      return { success: true, message: `Wallet recharged with ₹${amount}` }
+      return { success: true, newBalance, message: 'Wallet recharged successfully' }
     } catch (error) {
-      console.error('Error recharging wallet:', error)
-      return { success: false, message: 'Failed to recharge wallet' }
+      console.error('Unexpected error in rechargeWallet:', error)
+      return { success: false, message: 'An unexpected error occurred. Please try again.' }
+    }
+  }
+
+  /**
+   * Handle automatic wallet deduction when paid members are unhidden
+   */
+  static async deductForUnhiddenMembers(gymId: string, membersToUnhide: number): Promise<{ success: boolean; message: string; newBalance?: number }> {
+    try {
+      const deductionAmount = membersToUnhide * this.MONTHLY_CHARGE_PER_MEMBER
+      
+      // Get current wallet balance
+      const subscriptionData = await this.calculateSubscriptionData(gymId)
+      
+      if (subscriptionData.walletBalance < deductionAmount) {
+        return {
+          success: false,
+          message: `Insufficient balance. Required: ₹${deductionAmount}, Available: ₹${subscriptionData.walletBalance}`
+        }
+      }
+      
+      const balanceBefore = subscriptionData.walletBalance
+      const balanceAfter = balanceBefore - deductionAmount
+      
+      // Create deduction transaction
+      const { error: transactionError } = await supabase
+        .from('wallet_transactions')
+        .insert({
+          gym_id: gymId,
+          transaction_type: 'deduction',
+          amount_inr: -deductionAmount, // Negative for deduction
+          balance_before_inr: balanceBefore,
+          balance_after_inr: balanceAfter,
+          description: `Automatic deduction for unhiding ${membersToUnhide} paid member${membersToUnhide > 1 ? 's' : ''}`,
+          created_at: new Date().toISOString()
+        })
+      
+      if (transactionError) {
+        console.error('Error creating deduction transaction:', transactionError)
+        return {
+          success: false,
+          message: 'Failed to process wallet deduction. Please try again.'
+        }
+      }
+      
+      return {
+        success: true,
+        message: `Successfully deducted ₹${deductionAmount} for ${membersToUnhide} unhidden member${membersToUnhide > 1 ? 's' : ''}`,
+        newBalance: balanceAfter
+      }
+    } catch (error) {
+      console.error('Error processing automatic deduction:', error)
+      return {
+        success: false,
+        message: 'An unexpected error occurred during wallet deduction'
+      }
     }
   }
 

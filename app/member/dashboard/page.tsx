@@ -29,12 +29,17 @@ import {
   ChefHat,
   Camera,
   Dumbbell,
+  Target,
+  Timer,
+  Award,
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import Link from "next/link"
 import { supabase } from "@/lib/supabase"
 import { LeaderboardService, type LeaderboardMember } from '@/lib/leaderboard-service'
 import { persistentTimerService } from '@/lib/persistent-timer-service'
+import { locationTrackingService } from '@/lib/location-tracking-service'
+import { MemberAccessService } from '@/lib/member-access-service'
 
 export default function MemberDashboard() {
   const { toast } = useToast()
@@ -47,6 +52,16 @@ export default function MemberDashboard() {
   const [showReferralForm, setShowReferralForm] = useState(false)
   const [showEditProfile, setShowEditProfile] = useState(false)
   const [referralPhone, setReferralPhone] = useState("")
+  
+  // Access control states
+  const [accessDenied, setAccessDenied] = useState<{
+    reason: string
+    memberType: 'free' | 'paid'
+    memberPosition: number
+    gymOwner: { name: string; phone?: string } | null
+  } | null>(null)
+  const [memberType, setMemberType] = useState<'free' | 'paid'>('paid')
+  const [memberPosition, setMemberPosition] = useState<number>(0)
   
   // Timer state
   const [timerState, setTimerState] = useState({
@@ -96,6 +111,14 @@ export default function MemberDashboard() {
   const [leaderboard, setLeaderboard] = useState<LeaderboardMember[]>([])
   const [leaderboardSubscription, setLeaderboardSubscription] = useState<any>(null)
   const [gymLocation, setGymLocation] = useState<{ lat: number; lng: number } | null>(null)
+  const [trackingActive, setTrackingActive] = useState(false)
+  const [continuousPresenceTime, setContinuousPresenceTime] = useState(0)
+  const [locationStatus, setLocationStatus] = useState<'checking' | 'inside' | 'outside' | 'error'>('checking')
+  const [validationStatus, setValidationStatus] = useState({
+    withinRadius: false,
+    hasRequiredPresence: false,
+    canCheckIn: false,
+  })
 
   const calculateBMI = () => {
     if (!memberData.height || !memberData.weight) return null
@@ -144,11 +167,16 @@ export default function MemberDashboard() {
           description: "You've left the gym area. Timer stopped.",
         })
       },
-      onTimerComplete: () => {
-        toast({
-          title: "Check-in Complete!",
-          description: "You've completed your 20-minute gym session.",
-        })
+      onTimerComplete: (rewardResult) => {
+        if (rewardResult) {
+          // The reward service already shows the success toast with coin details
+          console.log('Timer completed with reward:', rewardResult);
+        } else {
+          toast({
+            title: "Check-in Complete!",
+            description: "You've completed your 20-minute gym session.",
+          })
+        }
         // Trigger automatic check-in
         handleAutoCheckIn()
       }
@@ -205,13 +233,63 @@ export default function MemberDashboard() {
     }
   }
 
-  useEffect(() => {
-    const fetchUserData = async () => {
-      const userData = localStorage.getItem("flexio_user")
-      if (!userData) {
+  const formatTime = (milliseconds: number): string => {
+    const minutes = Math.floor(milliseconds / 60000)
+    const seconds = Math.floor((milliseconds % 60000) / 1000)
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`
+  }
+
+  const fetchUserData = async () => {
+    const userData = localStorage.getItem("flexio_user")
+    if (!userData) {
+      toast({
+        title: "Access Denied",
+        description: "Please sign in to access the member dashboard.",
+        variant: "destructive",
+      })
+      setTimeout(() => {
+        window.location.href = "/auth/signin"
+      }, 2000)
+      return
+    }
+
+    const user = JSON.parse(userData)
+    if (user.user_type !== "member") {
+      toast({
+        title: "Access Denied",
+        description: "This is the member dashboard. Gym owners should use the gym owner dashboard.",
+        variant: "destructive",
+      })
+      setTimeout(() => {
+        window.location.href = user.user_type === "gym_owner" ? "/owner/dashboard" : "/auth/signin"
+      }, 2000)
+      return
+    }
+
+    try {
+      // Membership + gym (with location + coin value) + plan name
+      const { data: membershipData } = await supabase
+        .from("memberships")
+        .select(
+          `
+          *,
+          gyms (
+            gym_name,
+            gym_code,
+            coin_value,
+            location_latitude,
+            location_longitude
+          ),
+          gym_plans!memberships_plan_id_fkey ( plan_name )
+        `,
+        )
+        .eq("user_id", user.id)
+        .single()
+
+      if (!membershipData) {
         toast({
-          title: "Access Denied",
-          description: "Please sign in to access the member dashboard.",
+          title: "Membership Not Found",
+          description: "No active membership found. Please contact your gym.",
           variant: "destructive",
         })
         setTimeout(() => {
@@ -220,147 +298,143 @@ export default function MemberDashboard() {
         return
       }
 
-      const user = JSON.parse(userData)
-      if (user.user_type !== "member") {
+      // Check member access based on wallet balance
+      const accessResult = await MemberAccessService.checkMemberAccess(user.id, membershipData.gym_id)
+      
+      if (!accessResult.hasAccess) {
+        const gymOwner = await MemberAccessService.getGymOwnerContact(membershipData.gym_id)
+        
         toast({
-          title: "Access Denied",
-          description: "This is the member dashboard. Gym owners should use the gym owner dashboard.",
+          title: "Dashboard Access Restricted",
+          description: accessResult.memberType === 'paid' 
+            ? `Your gym owner needs to recharge their wallet to maintain your membership access. ${accessResult.reason}`
+            : accessResult.reason,
           variant: "destructive",
         })
-        setTimeout(() => {
-          window.location.href = user.user_type === "gym_owner" ? "/owner/dashboard" : "/auth/signin"
-        }, 2000)
+
+        setAccessDenied({
+          reason: accessResult.reason || 'Access denied',
+          memberType: accessResult.memberType,
+          memberPosition: accessResult.memberPosition,
+          gymOwner: gymOwner
+        })
+        setIsLoading(false)
         return
       }
 
-      try {
-        // Membership + gym (with location + coin value) + plan name
-        const { data: membershipData } = await supabase
-          .from("memberships")
-          .select(
-            `
-            *,
-            gyms (
-              gym_name,
-              gym_code,
-              coin_value,
-              location_latitude,
-              location_longitude
-            ),
-            gym_plans!memberships_plan_id_fkey ( plan_name )
-          `,
-          )
-          .eq("user_id", user.id)
-          .single()
+      // Set member type for UI display
+      setMemberType(accessResult.memberType)
+      setMemberPosition(accessResult.memberPosition)
 
-        if (membershipData?.gyms?.location_latitude && membershipData?.gyms?.location_longitude) {
-          setGymLocation({
-            lat: Number(membershipData.gyms.location_latitude),
-            lng: Number(membershipData.gyms.location_longitude),
-          })
-        }
-
-        // Coin balance
-        const { data: coinData } = await supabase.from("coin_transactions").select("amount").eq("user_id", user.id)
-        const totalCoins = coinData?.reduce((sum, t) => sum + (t.amount || 0), 0) || 0
-
-        // Check-in streak and monthly visits
-        const { data: checkInData } = await supabase
-          .from("check_ins")
-          .select("check_in_time")
-          .eq("user_id", user.id)
-          .order("check_in_time", { ascending: false })
-
-        let streak = 0
-        let monthlyVisits = 0
-        const now = new Date()
-        const currentMonth = now.getMonth()
-        const currentYear = now.getFullYear()
-
-        if (checkInData?.length) {
-          monthlyVisits = checkInData.filter((c) => {
-            const d = new Date(c.check_in_time)
-            return d.getMonth() === currentMonth && d.getFullYear() === currentYear
-          }).length
-
-          const todayStr = new Date().toDateString()
-          if (checkInData.some((c) => new Date(c.check_in_time).toDateString() === todayStr)) {
-            streak = 1
-            for (let i = 1; i < checkInData.length; i++) {
-              const prevDate = new Date(checkInData[i - 1].check_in_time).toDateString()
-              const currDate = new Date(checkInData[i].check_in_time).toDateString()
-              const dayDiff =
-                (new Date(prevDate).getTime() - new Date(currDate).getTime()) / (1000 * 60 * 60 * 24)
-              if (dayDiff === 1) streak++
-              else break
-            }
-          }
-        }
-
-        // Today's birthdays (gym mates only)
-        let birthdays: Array<{ name: string; age: number; user_id: string }> = []
-        if (membershipData?.gym_id) {
-          const { data: membersForGym } = await supabase
-            .from("memberships")
-            .select("user_id, users ( full_name, date_of_birth )")
-            .eq("gym_id", membershipData.gym_id)
-
-          const today = new Date()
-          type MemberRow = { user_id: string; users: { full_name: string; date_of_birth: string | null } | null }
-          birthdays =
-            (membersForGym as MemberRow[] | null)
-              ?.filter((m) => m.users?.date_of_birth && m.user_id !== user.id)
-              .filter((m) => {
-                const dob = new Date(m.users!.date_of_birth as string)
-                return dob.getMonth() === today.getMonth() && dob.getDate() === today.getDate()
-              })
-              .map((m) => {
-                const dob = new Date(m.users!.date_of_birth as string)
-                const age = today.getFullYear() - dob.getFullYear()
-                return { name: m.users!.full_name, age, user_id: m.user_id }
-              }) || []
-          setTodaysBirthdays(birthdays)
-        }
-
-        // Leaderboard will be handled by separate useEffect
-
-        // Wishes already sent today (disable the button)
-        const todayString = new Date().toISOString().split("T")[0]
-        const { data: wishesData } = await supabase
-          .from("birthday_wishes")
-          .select("birthday_user_id")
-          .eq("wisher_id", user.id)
-          .eq("wish_date", todayString)
-
-        const wishedIds = new Set(wishesData?.map((w) => w.birthday_user_id) || [])
-        setWishedMembers(new Set(birthdays.filter((b) => wishedIds.has(b.user_id)).map((b) => b.name)))
-
-
-
-        setMemberData({
-          name: user.full_name || "",
-          coins: totalCoins,
-          streak,
-          monthlyVisits,
-          membershipPlan: membershipData?.gym_plans?.plan_name || "",
-          nextPayment: membershipData?.expiry_date || "",
-          gymName: membershipData?.gyms?.gym_name || "",
-          gymCode: membershipData?.gyms?.gym_code || "",
-          gymId: membershipData?.gym_id ?? null,
-          coinValue: membershipData?.gyms?.coin_value ?? 4.0,
-          referralCode: user.phone_number || "",
-          height: user.height || 0,
-          weight: user.weight || 0,
-          profilePicture: user.profile_picture || null,
+      if (membershipData?.gyms?.location_latitude && membershipData?.gyms?.location_longitude) {
+        setGymLocation({
+          lat: Number(membershipData.gyms.location_latitude),
+          lng: Number(membershipData.gyms.location_longitude),
         })
-      } catch (error) {
-        console.error("Error fetching user data:", error)
-        setMemberData((prev) => ({ ...prev })) // no mock fallbacks
       }
 
-      setIsLoading(false)
+      // Coin balance
+      const { data: coinData } = await supabase.from("coin_transactions").select("amount").eq("user_id", user.id)
+      const totalCoins = coinData?.reduce((sum, t) => sum + (t.amount || 0), 0) || 0
+
+      // Check-in streak and monthly visits
+      const { data: checkInData } = await supabase
+        .from("check_ins")
+        .select("check_in_time")
+        .eq("user_id", user.id)
+        .order("check_in_time", { ascending: false })
+
+      let streak = 0
+      let monthlyVisits = 0
+      const now = new Date()
+      const currentMonth = now.getMonth()
+      const currentYear = now.getFullYear()
+
+      if (checkInData?.length) {
+        monthlyVisits = checkInData.filter((c) => {
+          const d = new Date(c.check_in_time)
+          return d.getMonth() === currentMonth && d.getFullYear() === currentYear
+        }).length
+
+        const todayStr = new Date().toDateString()
+        if (checkInData.some((c) => new Date(c.check_in_time).toDateString() === todayStr)) {
+          streak = 1
+          for (let i = 1; i < checkInData.length; i++) {
+            const prevDate = new Date(checkInData[i - 1].check_in_time).toDateString()
+            const currDate = new Date(checkInData[i].check_in_time).toDateString()
+            const dayDiff =
+              (new Date(prevDate).getTime() - new Date(currDate).getTime()) / (1000 * 60 * 60 * 24)
+            if (dayDiff === 1) streak++
+            else break
+          }
+        }
+      }
+
+      // Today's birthdays (gym mates only)
+      let birthdays: Array<{ name: string; age: number; user_id: string }> = []
+      if (membershipData?.gym_id) {
+        const { data: membersForGym } = await supabase
+          .from("memberships")
+          .select("user_id, users ( full_name, date_of_birth )")
+          .eq("gym_id", membershipData.gym_id)
+
+        const today = new Date()
+        type MemberRow = { user_id: string; users: { full_name: string; date_of_birth: string | null } | null }
+        birthdays =
+          (membersForGym as MemberRow[] | null)
+            ?.filter((m) => m.users?.date_of_birth && m.user_id !== user.id)
+            .filter((m) => {
+              const dob = new Date(m.users!.date_of_birth as string)
+              return dob.getMonth() === today.getMonth() && dob.getDate() === today.getDate()
+            })
+            .map((m) => {
+              const dob = new Date(m.users!.date_of_birth as string)
+              const age = today.getFullYear() - dob.getFullYear()
+              return { name: m.users!.full_name, age, user_id: m.user_id }
+            }) || []
+        setTodaysBirthdays(birthdays)
+      }
+
+      // Leaderboard will be handled by separate useEffect
+
+      // Wishes already sent today (disable the button)
+      const todayString = new Date().toISOString().split("T")[0]
+      const { data: wishesData } = await supabase
+        .from("birthday_wishes")
+        .select("birthday_user_id")
+        .eq("wisher_id", user.id)
+        .eq("wish_date", todayString)
+
+      const wishedIds = new Set(wishesData?.map((w) => w.birthday_user_id) || [])
+      setWishedMembers(new Set(birthdays.filter((b) => wishedIds.has(b.user_id)).map((b) => b.name)))
+
+
+
+      setMemberData({
+        name: user.full_name || "",
+        coins: totalCoins,
+        streak,
+        monthlyVisits,
+        membershipPlan: membershipData?.gym_plans?.plan_name || "",
+        nextPayment: membershipData?.expiry_date || "",
+        gymName: membershipData?.gyms?.gym_name || "",
+        gymCode: membershipData?.gyms?.gym_code || "",
+        gymId: membershipData?.gym_id ?? null,
+        coinValue: membershipData?.gyms?.coin_value ?? 4.0,
+        referralCode: user.phone_number || "",
+        height: user.height || 0,
+        weight: user.weight || 0,
+        profilePicture: user.profile_picture || null,
+      })
+    } catch (error) {
+      console.error("Error fetching user data:", error)
+      setMemberData((prev) => ({ ...prev })) // no mock fallbacks
     }
 
+    setIsLoading(false)
+  }
+
+  useEffect(() => {
     fetchUserData()
     
     // Cleanup subscription on unmount
@@ -408,6 +482,59 @@ export default function MemberDashboard() {
     }
   }, [memberData.gymId])
 
+  // Real-time access monitoring
+  useEffect(() => {
+    const userData = localStorage.getItem("flexio_user")
+    const user = userData ? JSON.parse(userData) : null
+    
+    if (memberData.gymId && user?.id && !accessDenied) {
+      // Set up real-time subscription for access changes
+      const subscription = MemberAccessService.subscribeToAccessChanges(
+        user.id,
+        memberData.gymId,
+        async (accessResult) => {
+          const hasAccess = accessResult.hasAccess
+          if (!hasAccess && accessResult) {
+            const gymOwner = await MemberAccessService.getGymOwnerContact(memberData.gymId!)
+            
+            toast({
+              title: "Dashboard Access Restricted",
+              description: accessResult.memberType === 'paid' 
+                ? `Your gym owner needs to recharge their wallet to maintain your membership access. ${accessResult.reason}`
+                : accessResult.reason,
+              variant: "destructive",
+            })
+
+            setAccessDenied({
+              reason: accessResult.reason || 'Access denied',
+              memberType: accessResult.memberType,
+              memberPosition: accessResult.memberPosition,
+              gymOwner: gymOwner
+            })
+          } else if (hasAccess && accessResult) {
+            // Access restored
+            setAccessDenied(null)
+            setMemberType(accessResult.memberType)
+            setMemberPosition(accessResult.memberPosition)
+            
+            toast({
+              title: "Dashboard Access Restored",
+              description: "Your gym owner has recharged their wallet. You now have full access!",
+              variant: "default",
+            })
+          }
+        }
+      )
+
+      // Cleanup subscription
+      return () => {
+        if (subscription) {
+          subscription.unsubscribe()
+        }
+      }
+    }
+  }, [memberData.gymId, accessDenied])
+
   // Separate useEffect for geolocation to avoid blocking UI
   useEffect(() => {
     if (!gymLocation) return
@@ -454,6 +581,43 @@ export default function MemberDashboard() {
       setShowManualCheckIn(true)
     }
   }, [gymLocation])
+
+  // Initialize location tracking service
+  useEffect(() => {
+    if (memberData.gymId && gymLocation) {
+      locationTrackingService.setGymLocation(gymLocation)
+      locationTrackingService.setCallbacks({
+        onLocationUpdate: (data: {
+           distance: number;
+           isWithinRadius: boolean;
+           continuousTime: number;
+           canAutoCheckIn: boolean;
+           canManualCheckIn: boolean;
+           validationStatus: {
+             withinRadius: boolean;
+             hasRequiredPresence: boolean;
+             canCheckIn: boolean;
+           };
+           currentPosition: any;
+           lastPosition: any;
+         }) => {
+           setLocation(data.currentPosition)
+           setDistanceFromGym(data.distance)
+           setCanCheckIn(data.canManualCheckIn)
+           setContinuousPresenceTime(data.continuousTime)
+           setValidationStatus(data.validationStatus)
+           setLocationStatus(data.isWithinRadius ? 'inside' : 'outside')
+           setTrackingActive(true)
+         }
+      })
+      
+      locationTrackingService.startTracking()
+
+      return () => {
+        locationTrackingService.stopTracking()
+      }
+    }
+  }, [memberData.gymId, gymLocation])
 
   const calculateDistance = (lat1: number, lng1: number, lat2: number, lng2: number) => {
     const R = 6371 // Earth's radius in kilometers
@@ -516,58 +680,79 @@ export default function MemberDashboard() {
   }
 
   const handleCheckIn = async () => {
+    if (isCheckingIn) return
     setIsCheckingIn(true)
-  
+
     try {
-      const userData = localStorage.getItem("flexio_user")
-      if (!userData) throw new Error("User not authenticated")
+      const userStr = localStorage.getItem("flexio_user")
+      if (!userStr) throw new Error("User not found")
       
-      const user = JSON.parse(userData)
-      const now = new Date().toISOString()
-      
-      // Insert check-in record
-      const { error: checkInError } = await supabase
-        .from("check_ins")
-        .insert({
-          user_id: user.id,
-          gym_id: memberData.gymId,
-          check_in_time: now,
-          location_latitude: location?.lat,
-          location_longitude: location?.lng,
-          distance_from_gym: distanceFromGym,
-        })
-      
-      if (checkInError) throw checkInError
-      
-      // Award coins
-      const { error: coinError } = await supabase
-        .from("coin_transactions")
-        .insert({
-          user_id: user.id,
-          gym_id: memberData.gymId,
-          transaction_type: "earned",
-          amount: 100,
-          description: "Daily check-in reward",
-        })
-      
-      if (coinError) throw coinError
-      
-      // Update member data
-      setMemberData((prev) => ({
-        ...prev,
-        coins: prev.coins + 100,
-        monthlyVisits: prev.monthlyVisits + 1,
-      }))
-      
-      toast({
-        title: "Check-in successful! 🎉",
-        description: "You earned 100 coins for today's workout!",
+      const user = JSON.parse(userStr)
+      const response = await fetch('/api/checkin', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userId: user.id,
+          gymId: memberData.gymId,
+          location: location,
+          distanceFromGym: distanceFromGym,
+        }),
       })
+
+      const result = await response.json()
+      
+      if (response.ok && result.success) {
+        toast({
+          title: "Check-in Successful! 🎉",
+          description: `You've earned ${result.coinsEarned} coins!`,
+        })
+        
+        // Update member data
+        setMemberData(prev => ({
+          ...prev,
+          coins: prev.coins + result.coinsEarned,
+          streak: result.newStreak,
+          monthlyVisits: prev.monthlyVisits + 1,
+        }))
+        
+        // Reset check-in trigger
+        locationTrackingService.resetCheckInTrigger()
+        
+        // Refresh the page to update all data
+        setTimeout(() => {
+          window.location.reload()
+        }, 2000)
+      } else {
+        throw new Error(result.error || 'Check-in failed')
+      }
     } catch (error) {
-      console.error("Check-in error:", error)
+      console.error('Check-in error:', error)
+      
+      // Provide user-friendly error messages based on error type
+      let errorMessage = "Please try again."
+      let errorTitle = "Check-in Failed"
+      
+      if (error instanceof Error) {
+        const message = error.message.toLowerCase()
+        
+        if (message.includes('minimum presence requirement') || 
+            message.includes('geofence') || 
+            message.includes('location') ||
+            message.includes('distance')) {
+          errorTitle = "Location Check Failed"
+          errorMessage = "Are you sure you are in the Gym? Please make sure you're within the gym premises and try again."
+        } else if (message.includes('access') || message.includes('membership')) {
+          errorMessage = "Please check your membership status or contact the gym owner."
+        } else {
+          errorMessage = error.message
+        }
+      }
+      
       toast({
-        title: "Check-in failed",
-        description: "Please try again later.",
+        title: errorTitle,
+        description: errorMessage,
         variant: "destructive",
       })
     } finally {
@@ -735,6 +920,74 @@ export default function MemberDashboard() {
     )
   }
 
+  // Access denied screen
+  if (accessDenied) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black flex items-center justify-center p-4">
+        <Card className="w-full max-w-md bg-gray-800/90 border-gray-700">
+          <CardHeader className="text-center">
+            <div className="mx-auto mb-4 w-12 h-12 bg-red-500/20 rounded-full flex items-center justify-center">
+              <AlertCircle className="w-6 h-6 text-red-400" />
+            </div>
+            <CardTitle className="text-xl font-bold text-white">
+              Dashboard Access Restricted
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="text-center space-y-2">
+              <p className="text-sm text-gray-400">
+                You are member #{accessDenied.memberPosition} ({accessDenied.memberType} member)
+              </p>
+              <p className="text-sm text-gray-300">
+                {accessDenied.reason}
+              </p>
+            </div>
+            
+            {accessDenied.memberType === 'paid' && (
+              <div className="bg-blue-500/10 p-4 rounded-lg border border-blue-500/20">
+                <h4 className="font-medium text-blue-300 mb-2">What does this mean?</h4>
+                <ul className="text-sm text-blue-200 space-y-1">
+                  <li>• Your gym owner needs to recharge their wallet</li>
+                  <li>• Each paid member requires ₹10 in the wallet</li>
+                  <li>• You'll regain access once they add funds</li>
+                </ul>
+              </div>
+            )}
+            
+            {accessDenied.gymOwner && (
+              <div className="bg-gray-700/50 p-4 rounded-lg">
+                <h4 className="font-medium text-gray-300 mb-2">Contact Your Gym Owner</h4>
+                <div className="space-y-1 text-sm text-gray-400">
+                  <p><strong>Name:</strong> {accessDenied.gymOwner.name}</p>
+                  {accessDenied.gymOwner.phone && (
+                    <p><strong>Phone:</strong> {accessDenied.gymOwner.phone}</p>
+                  )}
+                </div>
+              </div>
+            )}
+            
+            <div className="flex space-x-2">
+              <Button 
+                onClick={() => window.location.href = '/auth/signin'}
+                variant="outline" 
+                className="flex-1 border-gray-600 text-gray-300 hover:bg-gray-700"
+              >
+                <LogOut className="w-4 h-4 mr-2" />
+                Sign Out
+              </Button>
+              <Button 
+                onClick={() => window.location.reload()}
+                className="flex-1 bg-blue-600 hover:bg-blue-700"
+              >
+                Refresh
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black pb-20 text-white">
       {/* Timer Display - Always visible when active */}
@@ -770,158 +1023,200 @@ export default function MemberDashboard() {
         </div>
       )}
       
-      <header className="fixed top-0 left-0 right-0 z-50 bg-[#da1c24] border-b border-red-800">
-        <div className="max-w-md mx-auto px-3 py-3">
+      <header className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-r from-red-600 via-red-700 to-red-800 backdrop-blur-xl border-b border-red-800/50 shadow-2xl">
+        <div className="max-w-md mx-auto px-6 py-4">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3 min-w-0 flex-1">
-              {/* Updated logo to match owner dashboard style */}
-              <div className="w-10 h-10 bg-gradient-to-br from-red-500 to-red-600 rounded-xl flex items-center justify-center border-2 border-white/90 shadow-lg flex-shrink-0">
+            <Link href="/member/dashboard" className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="w-10 h-10 bg-gradient-to-br from-white/20 to-white/10 rounded-xl flex items-center justify-center border border-white/30 backdrop-blur-sm shadow-lg flex-shrink-0">
                 <Dumbbell className="h-6 w-6 text-white" />
               </div>
-              
-              {/* Dynamic Gym Name Section */}
-              <div className="flex flex-col min-w-0">
-                <h1 className="text-xl font-bold text-transparent bg-gradient-to-r from-white via-red-100 to-white bg-clip-text tracking-tight leading-tight truncate">
-                  {memberData.gymName || 'Flexio'}
-                </h1>
-                <span className="text-xs text-red-100/80 font-medium tracking-wide">
-                  Member Dashboard
-                </span>
+              <div>
+                <h1 className="text-lg font-bold text-white">Dashboard</h1>
+                <p className="text-xs text-red-100/80">{memberData.gymName}</p>
               </div>
+            </Link>
+            
+            <div className="flex items-center space-x-3">
+              <div className="text-right">
+                <p className="text-sm font-semibold text-white">
+                  {memberData.name || 'Member'}
+                </p>
+                <div className="flex items-center gap-2">
+                  <Badge variant="secondary" className="bg-white/20 text-white border-0 text-xs px-2 py-0.5">
+                    {memberData.coins} coins
+                  </Badge>
+                  <Badge variant="secondary" className="bg-orange-500/20 text-orange-200 border-0 text-xs px-2 py-0.5">
+                    {memberData.streak} streak
+                  </Badge>
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleLogout}
+                className="text-white hover:bg-white/20 flex-shrink-0 ml-2"
+              >
+                <LogOut className="h-4 w-4" />
+              </Button>
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleLogout}
-              className="text-white hover:bg-white/20 flex-shrink-0"
-            >
-              <LogOut className="h-4 w-4 mr-1" />
-              <span className="hidden xs:inline">Logout</span>
-            </Button>
           </div>
         </div>
       </header>
 
-      <main className="px-3 py-6 pt-20">
-        <div className="max-w-md mx-auto space-y-6">
-          <div className="text-center px-2">
-            <h1 className="text-2xl font-bold text-white mb-1 truncate">
-              Welcome back, {memberData.name.split(" ")[0]}!
-            </h1>
-            <p className="text-lg font-semibold text-gray-300 mb-1 truncate">{memberData.gymName}</p>
-            <p className="text-sm text-gray-400 truncate">Member Dashboard</p>
-            <Badge variant="secondary" className="bg-blue-900 text-blue-200 mt-2">
-              {memberData.membershipPlan}
-            </Badge>
-          </div>
-
-          <Card className="bg-gray-800/90 border-gray-700 backdrop-blur-sm">
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <div className="min-w-0 flex-1">
-                  <CardTitle className="text-2xl text-white">{memberData.coins.toLocaleString()}</CardTitle>
-                  <CardDescription className="text-gray-400 text-sm">
-                    Total Coins • Worth ₹{(memberData.coins * memberData.coinValue).toLocaleString()}
-                  </CardDescription>
-                  <p className="text-xs text-gray-500 mt-1">1 coin = ₹{memberData.coinValue.toFixed(2)}</p>
+      {/* Main Content */}
+      <main className="max-w-md mx-auto px-6 py-8 pt-24 space-y-6">
+        
+        {/* Check-in Card - Prominent Position */}
+        <Card className="bg-gradient-to-br from-blue-950 to-indigo-950 border-blue-800 shadow-xl">
+          <CardContent className="p-6">
+            <div className="text-center space-y-4">
+              <div className="flex items-center justify-center gap-2 mb-3">
+                <div className="p-3 bg-blue-900 rounded-full">
+                  <Target className="h-8 w-8 text-blue-400" />
                 </div>
-                <Trophy className="h-8 w-8 text-yellow-500 flex-shrink-0" />
+                <CheckCircle className="h-6 w-6 text-green-500" />
               </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center gap-2 text-sm">
-                <MapPin className="h-4 w-4 text-gray-500 flex-shrink-0" />
-                <span className="text-gray-400 truncate">
-                  {locationError ? (
-                    <span className="flex items-center gap-1">
-                      <AlertCircle className="h-3 w-3 text-orange-500 flex-shrink-0" />
-                      <span className="truncate">{locationError}</span>
-                    </span>
-                  ) : distanceFromGym !== null ? (
-                    formatDistance(distanceFromGym)
-                  ) : (
-                    "Getting location..."
-                  )}
-                </span>
-                {canCheckIn && (
-                  <Badge variant="secondary" className="bg-green-900 text-green-200 flex-shrink-0">
-                    In Range
-                  </Badge>
+              <div>
+                <h3 className="text-xl font-bold text-blue-200 mb-2">Daily Check-in</h3>
+                
+                {/* Countdown Timer Display */}
+                {timerState.isActive && (
+                  <div className="mb-4 p-3 bg-gradient-to-r from-green-900/50 to-emerald-900/50 rounded-lg border border-green-700/50">
+                    <div className="flex items-center justify-center gap-2 mb-2">
+                      <Timer className="h-5 w-5 text-green-400" />
+                      <span className="text-sm font-medium text-green-300">Countdown Timer Active</span>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-green-200 mb-1">
+                        {timerState.formattedRemainingTime}
+                      </div>
+                      <div className="text-xs text-green-400">
+                        Time remaining to earn coins
+                      </div>
+                      <div className="w-full bg-green-900/30 rounded-full h-2 mt-2">
+                        <div 
+                          className="bg-gradient-to-r from-green-500 to-emerald-400 h-2 rounded-full transition-all duration-1000"
+                          style={{ 
+                            width: `${((20 * 60 * 1000 - timerState.remainingTime) / (20 * 60 * 1000)) * 100}%` 
+                          }}
+                        ></div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Timer Status for Daily Limit */}
+                {!timerState.isActive && !persistentTimerService.canStartTimerToday() && (
+                  <div className="mb-4 p-3 bg-gradient-to-r from-amber-900/50 to-orange-900/50 rounded-lg border border-amber-700/50">
+                    <div className="flex items-center justify-center gap-2 mb-2">
+                      <Clock className="h-5 w-5 text-amber-400" />
+                      <span className="text-sm font-medium text-amber-300">Daily Timer Used</span>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-sm text-amber-200">
+                        You've already used your daily 20-minute timer
+                      </div>
+                      <div className="text-xs text-amber-400 mt-1">
+                        Come back tomorrow for another chance!
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                <p className="text-sm text-blue-300 mb-4">
+                  {locationStatus === 'inside' 
+                    ? `You're at the gym! Distance: ${distanceFromGym?.toFixed(0)}m`
+                    : locationStatus === 'outside'
+                    ? `Distance from gym: ${distanceFromGym?.toFixed(0)}m`
+                    : locationStatus === 'checking'
+                    ? 'Checking your location...'
+                    : 'Location unavailable'
+                  }
+                </p>
+                {locationError && (
+                  <div className="flex items-center justify-center gap-2 mb-3 p-2 bg-orange-900/50 rounded-lg">
+                    <AlertCircle className="h-4 w-4 text-orange-400" />
+                    <span className="text-sm text-orange-300">{locationError}</span>
+                  </div>
                 )}
               </div>
-
-              {/* Check-in logic with improved mobile buttons */}
-              {!locationError ? (
-                <Button
-                  onClick={handleCheckIn}
-                  disabled={!canCheckIn || isCheckingIn}
-                  className="w-full bg-transparent border-white text-white hover:bg-white hover:text-gray-900 min-h-[44px]"
-                  size="lg"
-                  variant="outline"
-                >
-                  {isCheckingIn ? (
-                    <>
-                      <Clock className="h-4 w-4 mr-2 animate-spin flex-shrink-0" />
-                      <span className="truncate">Checking In...</span>
-                    </>
-                  ) : canCheckIn ? (
-                    <>
-                      <CheckCircle className="h-4 w-4 mr-2 flex-shrink-0" />
-                      <span className="truncate">Check In Now (+100 coins)</span>
-                    </>
-                  ) : (
-                    <>
-                      <Navigation className="h-4 w-4 mr-2 flex-shrink-0" />
-                      <span className="truncate">Get Closer to Check In</span>
-                    </>
-                  )}
-                </Button>
-              ) : (
-                <div className="space-y-3">
-                  <div className="p-3 bg-orange-950 rounded-lg border border-orange-800">
-                    <div className="flex items-center gap-2 mb-2">
-                      <AlertCircle className="h-4 w-4 text-orange-600 flex-shrink-0" />
-                      <span className="text-sm font-medium text-orange-200 truncate">GPS Check-in Unavailable</span>
-                    </div>
-                    <p className="text-xs text-orange-300 leading-relaxed">
-                      Location access is needed for automatic check-ins. You can still check in manually below.
-                    </p>
-                  </div>
-
-                  {showManualCheckIn && (
-                    <Button
-                      onClick={handleManualCheckIn}
-                      disabled={isCheckingIn}
-                      className="w-full bg-transparent border-white text-white hover:bg-white hover:text-gray-900 min-h-[44px]"
-                      size="lg"
-                      variant="outline"
-                    >
-                      {isCheckingIn ? (
-                        <>
-                          <Clock className="h-4 w-4 mr-2 animate-spin flex-shrink-0" />
-                          <span className="truncate">Checking In...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Smartphone className="h-4 w-4 mr-2 flex-shrink-0" />
-                          <span className="truncate">Manual Check In (+100 coins)</span>
-                        </>
-                      )}
-                    </Button>
-                  )}
-
-                  <Button
-                    onClick={() => window.location.reload()}
-                    variant="ghost"
-                    size="sm"
-                    className="w-full text-xs text-gray-400 hover:text-white min-h-[36px]"
+              
+              {/* Check-in Button */}
+              <div className="space-y-3">
+                {canCheckIn ? (
+                  <Button 
+                    onClick={handleCheckIn}
+                    disabled={isCheckingIn}
+                    className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 text-lg" 
+                    size="lg"
                   >
-                    Try GPS Again
+                    {isCheckingIn ? (
+                      <div className="flex items-center gap-2">
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        Checking in...
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <CheckCircle className="h-5 w-5" />
+                        Check In Now
+                      </div>
+                    )}
                   </Button>
+                ) : (
+                  <div className="space-y-2">
+                    <Button 
+                      disabled
+                      className="w-full bg-gray-600 text-gray-300 font-semibold py-3 text-lg cursor-not-allowed" 
+                      size="lg"
+                    >
+                      <div className="flex items-center gap-2">
+                        <MapPin className="h-5 w-5" />
+                        Move Closer to Gym
+                      </div>
+                    </Button>
+                    {showManualCheckIn && (
+                      <Button 
+                        onClick={handleManualCheckIn}
+                        disabled={isCheckingIn}
+                        variant="outline"
+                        className="w-full border-blue-400 text-blue-300 hover:bg-blue-900/50" 
+                        size="lg"
+                      >
+                        {isCheckingIn ? (
+                          <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                            Processing...
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <Smartphone className="h-5 w-5" />
+                            Manual Check-in
+                          </div>
+                        )}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+              
+              {/* Quick Stats */}
+              <div className="flex justify-center gap-4 pt-2">
+                <div className="text-center">
+                  <div className="text-lg font-bold text-blue-200">{memberData.streak}</div>
+                  <div className="text-xs text-blue-400">Day Streak</div>
                 </div>
-              )}
-            </CardContent>
-          </Card>
+                <div className="text-center">
+                  <div className="text-lg font-bold text-blue-200">{memberData.monthlyVisits}</div>
+                  <div className="text-xs text-blue-400">This Month</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-lg font-bold text-blue-200">{memberData.coins}</div>
+                  <div className="text-xs text-blue-400">Total Coins</div>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
 
           {(() => {
             const paymentStatus = getPaymentStatus()
@@ -975,28 +1270,28 @@ export default function MemberDashboard() {
             </CardContent>
           </Card>
 
-          {/* Stats Grid */}
-          <div className="grid grid-cols-2 gap-4">
-            <Card className="bg-gray-800 border-gray-700">
-              <CardContent className="p-4 text-center">
-                <div className="flex items-center justify-center mb-2">
-                  <Zap className="h-5 w-5 text-orange-500" />
-                </div>
-                <div className="text-2xl font-bold text-white">{memberData.streak}</div>
-                <div className="text-sm text-gray-400">Day Streak</div>
-              </CardContent>
-            </Card>
-
-            <Card className="bg-gray-800 border-gray-700">
-              <CardContent className="p-4 text-center">
-                <div className="flex items-center justify-center mb-2">
-                  <Calendar className="h-5 w-5 text-blue-500" />
-                </div>
-                <div className="text-2xl font-bold text-white">{memberData.monthlyVisits}</div>
-                <div className="text-sm text-gray-400">This Month</div>
-              </CardContent>
-            </Card>
-          </div>
+        {/* Quick Stats */}
+        <div className="grid grid-cols-2 gap-4">
+          <Card className="bg-gradient-to-br from-orange-500/10 to-orange-600/10 border-orange-500/20 backdrop-blur-xl shadow-xl">
+            <CardContent className="p-4 text-center">
+              <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-orange-600 rounded-xl flex items-center justify-center mx-auto mb-2 shadow-lg shadow-orange-500/30">
+                <Award className="h-5 w-5 text-white" />
+              </div>
+              <div className="text-2xl font-bold text-white mb-1">{memberData.streak}</div>
+              <div className="text-xs text-gray-400 font-medium">Day Streak</div>
+            </CardContent>
+          </Card>
+          
+          <Card className="bg-gradient-to-br from-yellow-500/10 to-yellow-600/10 border-yellow-500/20 backdrop-blur-xl shadow-xl">
+            <CardContent className="p-4 text-center">
+              <div className="w-10 h-10 bg-gradient-to-br from-yellow-500 to-yellow-600 rounded-xl flex items-center justify-center mx-auto mb-2 shadow-lg shadow-yellow-500/30">
+                <Zap className="h-5 w-5 text-white" />
+              </div>
+              <div className="text-2xl font-bold text-white mb-1">{memberData.coins}</div>
+              <div className="text-xs text-gray-400 font-medium">Total Coins</div>
+            </CardContent>
+          </Card>
+        </div>
 
           {/* BMI Status */}
           {bmi && (
@@ -1334,40 +1629,38 @@ export default function MemberDashboard() {
               )}
             </CardContent>
           </Card>
-        </div>
       </main>
 
-      <footer className="fixed bottom-0 left-0 right-0 z-50 bg-[#da1c24] border-t border-red-800">
-        <div className="max-w-md mx-auto px-3 py-2">
-          <div className="flex items-center justify-between">
+      {/* Bottom Navigation */}
+      <div className="fixed bottom-0 left-0 right-0 bg-gray-900/98 backdrop-blur-xl border-t border-gray-800/50 shadow-2xl">
+        <div className="max-w-md mx-auto px-6 py-4">
+          <div className="flex justify-center space-x-8">
             <Link
               href="/member/dashboard"
-              className="flex flex-col items-center gap-1 text-white hover:text-white/80 min-w-0"
+              className="flex items-center gap-2 text-white hover:text-gray-300 transition-colors duration-200"
             >
-              <Home className="h-5 w-5 flex-shrink-0" />
-              <span className="text-xs font-medium truncate">Home</span>
+              <Home className="h-5 w-5" />
+              <span className="text-sm font-medium">Dashboard</span>
             </Link>
-
+            
+            <Link
+              href="/member/checkin"
+              className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors duration-200"
+            >
+              <CheckCircle className="h-5 w-5" />
+              <span className="text-sm font-medium">Check In</span>
+            </Link>
+            
             <Link
               href="/member/calorie-checker"
-              className="flex flex-col items-center gap-1 text-white hover:text-white/80"
+              className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors duration-200"
             >
-              <div className="p-2 bg-white/20 rounded-full">
-                <Camera className="h-7 w-7" />
-              </div>
-              <span className="text-xs font-medium truncate">Calorie Checker</span>
-            </Link>
-
-            <Link
-              href="/member/profile"
-              className="flex flex-col items-center gap-1 text-white hover:text-white/80 min-w-0"
-            >
-              <Edit3 className="h-5 w-5 flex-shrink-0" />
-              <span className="text-xs font-medium truncate">Profile</span>
+              <Camera className="h-5 w-5" />
+              <span className="text-sm font-medium">Scanner</span>
             </Link>
           </div>
         </div>
-      </footer>
+      </div>
     </div>
   )
 }

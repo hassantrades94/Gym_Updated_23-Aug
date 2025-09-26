@@ -188,32 +188,40 @@ class LocationTrackingService {
 
     // Check if user entered or left the geofence
     if (isWithinRadius && !this.trackingState.isWithinRadius) {
-      // User entered the geofence - start timer automatically
+      // User entered the geofence - start timer automatically if allowed
       this.trackingState.isWithinRadius = true;
       this.trackingState.entryTime = currentTime;
       this.trackingState.checkInTriggered = false;
       
-      // Get user data for timer
+      // Update geofence status in timer service
+      persistentTimerService.updateGeofenceStatus(true, currentTime);
+      
+      // Get user data for timer and check if timer can be started today
       const userData = localStorage.getItem('flexio_user');
-      if (userData) {
+      if (userData && persistentTimerService.canStartTimerToday()) {
         const user = JSON.parse(userData);
         const membershipData = localStorage.getItem('flexio_membership');
         if (membershipData) {
           const membership = JSON.parse(membershipData);
-          persistentTimerService.startTimer(user.id, membership.gym_id);
+          const timerStarted = persistentTimerService.startTimer(user.id, membership.gym_id);
+          if (timerStarted) {
+            console.log('20-minute countdown timer started automatically');
+          }
         }
+      } else if (userData && !persistentTimerService.canStartTimerToday()) {
+        console.log('Timer already used today - daily limit reached');
       }
       
       console.log('User entered geofence at:', new Date(currentTime));
     } else if (!isWithinRadius && this.trackingState.isWithinRadius) {
-      // User left the geofence - stop timer
+      // User left the geofence - update geofence status (timer will be stopped automatically)
       this.trackingState.isWithinRadius = false;
       this.trackingState.entryTime = null;
       this.trackingState.continuousPresenceTime = 0;
       this.trackingState.checkInTriggered = false;
       
-      // Stop the timer when user exits geofence
-      persistentTimerService.stopTimer();
+      // Update geofence status in timer service (this will stop the timer)
+      persistentTimerService.updateGeofenceStatus(false);
       
       console.log('User left geofence at:', new Date(currentTime));
     }

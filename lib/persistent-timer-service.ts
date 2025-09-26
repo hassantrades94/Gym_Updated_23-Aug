@@ -1,3 +1,6 @@
+import { toast } from 'sonner';
+import { rewardCalculationService, type RewardCalculationResult } from './reward-calculation-service';
+
 interface TimerState {
   isActive: boolean;
   startTime: number | null;
@@ -6,13 +9,16 @@ interface TimerState {
   gymId: string | null;
   sessionId: string;
   lastUpdate: number;
+  lastStartDate: string | null; // Track last start date (YYYY-MM-DD format)
+  isWithinGeofence: boolean; // Track if user is within geofenced area
+  geofenceEntryTime: number | null; // When user entered geofence
 }
 
 interface TimerCallbacks {
   onTimerUpdate?: (elapsedTime: number, formattedTime: string) => void;
-  onTimerComplete?: () => void;
   onTimerStart?: () => void;
   onTimerStop?: () => void;
+  onTimerComplete?: (rewardResult?: RewardCalculationResult) => void;
 }
 
 class PersistentTimerService {
@@ -22,8 +28,11 @@ class PersistentTimerService {
     elapsedTime: 0,
     userId: null,
     gymId: null,
-    sessionId: '',
-    lastUpdate: Date.now()
+    sessionId: this.generateSessionId(),
+    lastUpdate: Date.now(),
+    lastStartDate: null,
+    isWithinGeofence: false,
+    geofenceEntryTime: null,
   };
 
   private timerInterval: NodeJS.Timeout | null = null;
@@ -52,7 +61,15 @@ class PersistentTimerService {
 
   startTimer(userId: string, gymId: string): boolean {
     if (this.timerState.isActive) {
-      return false; // Timer already active
+      console.log('Timer is already active');
+      return false;
+    }
+
+    // Check if timer was already started today (daily restriction)
+    const today = new Date().toISOString().split('T')[0];
+    if (this.timerState.lastStartDate === today) {
+      console.log('Timer already started today. Only one timer per calendar day is allowed.');
+      return false;
     }
 
     const now = Date.now();
@@ -63,13 +80,15 @@ class PersistentTimerService {
       userId,
       gymId,
       sessionId: this.generateSessionId(),
-      lastUpdate: now
+      lastUpdate: now,
+      lastStartDate: today,
+      isWithinGeofence: this.timerState.isWithinGeofence,
+      geofenceEntryTime: this.timerState.geofenceEntryTime,
     };
 
     this.saveTimerState();
     this.startTimerInterval();
-    this.callbacks.onTimerStart?.();
-    
+    console.log('Timer started for user:', userId, 'at gym:', gymId);
     return true;
   }
 
@@ -83,6 +102,31 @@ class PersistentTimerService {
     this.clearTimerInterval();
     this.saveTimerState();
     this.callbacks.onTimerStop?.();
+  }
+
+  // Update geofence status and handle timer logic
+  updateGeofenceStatus(isWithinGeofence: boolean, entryTime?: number): void {
+    const wasWithinGeofence = this.timerState.isWithinGeofence;
+    this.timerState.isWithinGeofence = isWithinGeofence;
+    
+    if (isWithinGeofence && !wasWithinGeofence) {
+      // User entered geofence
+      this.timerState.geofenceEntryTime = entryTime || Date.now();
+    } else if (!isWithinGeofence && wasWithinGeofence) {
+      // User left geofence - reset timer only if active
+      this.timerState.geofenceEntryTime = null;
+      if (this.timerState.isActive) {
+        console.log('Timer stopped - user exited geofenced area');
+        this.stopTimer();
+      }
+    }
+    
+    this.saveTimerState();
+  }
+
+  // Check if timer should be preserved during page refresh
+  shouldPreserveTimer(): boolean {
+    return this.timerState.isWithinGeofence && this.timerState.isActive;
   }
 
   pauseTimer(): void {
@@ -141,9 +185,35 @@ class PersistentTimerService {
     this.timerState.lastUpdate = now;
   }
 
-  private completeTimer(): void {
+  private async completeTimer(): Promise<void> {
     this.clearTimerInterval();
-    this.callbacks.onTimerComplete?.();
+    
+    // Calculate and award coins based on streak
+    let rewardResult: RewardCalculationResult | undefined;
+    
+    if (this.timerState.userId && this.timerState.gymId) {
+      try {
+        // Get current user streak (this would normally come from database)
+        const currentStreak = await this.getCurrentUserStreak(this.timerState.userId);
+        
+        // Get gym-specific reward settings
+        const gymSettings = await rewardCalculationService.getGymRewardSettings(this.timerState.gymId);
+        
+        // Calculate reward based on streak and gym settings
+        rewardResult = rewardCalculationService.calculateTimerCompletionReward(currentStreak, gymSettings);
+        
+        // Award coins to user (this would normally update database)
+        await this.awardCoinsToUser(this.timerState.userId, rewardResult.coinsEarned, rewardResult.description);
+        
+        // Show success message with formatted reward description
+        toast.success(rewardCalculationService.formatRewardDescription(rewardResult));
+      } catch (error) {
+        console.error('Failed to calculate or award timer completion reward:', error);
+        toast.error('Timer completed but failed to award coins. Please contact support.');
+      }
+    }
+    
+    this.callbacks.onTimerComplete?.(rewardResult);
     this.stopTimer();
   }
 
@@ -168,10 +238,28 @@ class PersistentTimerService {
           if (this.isValidTimerState(parsedState)) {
             this.timerState = parsedState;
             
-            // Update elapsed time based on interruption duration
+            // Enhanced timer restoration logic
             if (this.timerState.isActive && this.timerState.startTime) {
               const now = Date.now();
-              this.timerState.elapsedTime = now - this.timerState.startTime;
+              const totalElapsed = now - this.timerState.startTime;
+              
+              // Check if timer should be preserved (within geofence)
+              if (this.shouldPreserveTimer()) {
+                // Restore timer with accumulated elapsed time
+                this.timerState.elapsedTime = totalElapsed;
+                
+                // Check if timer has exceeded maximum duration
+                if (totalElapsed >= this.MAX_TIMER_DURATION) {
+                  // Timer completed while away, trigger completion
+                  this.completeTimer();
+                } else {
+                  console.log('Timer restored from page refresh - remaining within geofence');
+                }
+              } else {
+                // User not within geofence, reset timer
+                console.log('Timer reset - user not within geofenced area');
+                this.resetTimerState();
+              }
             }
           }
         }
@@ -188,7 +276,9 @@ class PersistentTimerService {
       typeof state.isActive === 'boolean' &&
       (state.startTime === null || typeof state.startTime === 'number') &&
       typeof state.elapsedTime === 'number' &&
-      typeof state.sessionId === 'string'
+      typeof state.sessionId === 'string' &&
+      typeof state.isWithinGeofence === 'boolean' &&
+      (state.geofenceEntryTime === null || typeof state.geofenceEntryTime === 'number')
     );
   }
 
@@ -199,8 +289,11 @@ class PersistentTimerService {
       elapsedTime: 0,
       userId: null,
       gymId: null,
-      sessionId: '',
-      lastUpdate: Date.now()
+      sessionId: this.generateSessionId(),
+      lastUpdate: Date.now(),
+      lastStartDate: null,
+      isWithinGeofence: false,
+      geofenceEntryTime: null,
     };
     this.saveTimerState();
   }
@@ -286,12 +379,29 @@ class PersistentTimerService {
     return Math.max(0, this.MAX_TIMER_DURATION - this.timerState.elapsedTime);
   }
 
+  canStartTimerToday(): boolean {
+    const today = new Date().toISOString().split('T')[0];
+    return this.timerState.lastStartDate !== today && !this.timerState.isActive;
+  }
+
   getFormattedRemainingTime(): string {
     return this.formatTime(this.getRemainingTime());
   }
 
   getTimerState(): TimerState {
     return { ...this.timerState };
+  }
+
+  // Helper methods for reward system integration
+  private async getCurrentUserStreak(userId: string): Promise<number> {
+    // This would normally fetch from your database
+    // For now, return a mock value
+    return 1;
+  }
+
+  private async awardCoinsToUser(userId: string, coins: number, description: string): Promise<void> {
+    // This would normally update your database
+    console.log(`Awarding ${coins} coins to user ${userId}: ${description}`);
   }
 
   // Cleanup method

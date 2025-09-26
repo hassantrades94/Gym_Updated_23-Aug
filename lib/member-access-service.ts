@@ -12,6 +12,54 @@ export class MemberAccessService {
   private static readonly FREE_MEMBER_LIMIT = 5
 
   /**
+   * Subscribe to real-time access changes for a member
+   * @param userId - The member's user ID
+   * @param gymId - The gym ID
+   * @param onAccessChange - Callback when access status changes
+   * @returns Subscription object
+   */
+  static subscribeToAccessChanges(
+    userId: string,
+    gymId: string,
+    onAccessChange: (accessResult: MemberAccessResult) => void
+  ) {
+    // Subscribe to wallet transactions that might affect member access
+    const walletSubscription = supabase
+      .channel(`member_access_${userId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'wallet_transactions',
+          filter: `gym_id=eq.${gymId}`
+        },
+        async () => {
+          // Check access when wallet balance changes
+          const accessResult = await this.checkMemberAccess(userId, gymId)
+          onAccessChange(accessResult)
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'memberships',
+          filter: `gym_id=eq.${gymId}`
+        },
+        async () => {
+          // Check access when memberships change (affects member positions)
+          const accessResult = await this.checkMemberAccess(userId, gymId)
+          onAccessChange(accessResult)
+        }
+      )
+      .subscribe()
+
+    return walletSubscription
+  }
+
+  /**
    * Check if a member should have dashboard access
    * @param userId - The member's user ID
    * @param gymId - The gym ID
@@ -97,15 +145,16 @@ export class MemberAccessService {
         .from('gyms')
         .select(`
           gym_name,
-          users ( full_name, phone_number )
+          owner_id,
+          users!gyms_owner_id_fkey ( full_name, phone_number )
         `)
         .eq('id', gymId)
         .single()
 
       if (gymData?.users) {
         return {
-          name: gymData.users.full_name || gymData.gym_name,
-          phone: gymData.users.phone_number
+          name: (gymData.users as any).full_name || gymData.gym_name,
+          phone: (gymData.users as any).phone_number
         }
       }
       return null
